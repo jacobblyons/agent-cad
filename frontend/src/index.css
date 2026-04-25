@@ -1,0 +1,56 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans:
+    "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+
+  /* VSCode Dark+ palette */
+  --color-bg: #1e1e1e;          /* editor */
+  --color-panel: #252526;       /* sidebar */
+  --color-panel-2: #2d2d30;     /* tabs / inputs */
+  --color-panel-3: #333333;     /* activity bar */
+  --color-border: #3c3c3c;
+  --color-border-strong: #4e4e52;
+  --color-text: #cccccc;
+  --color-muted: #858585;
+  --color-accent: #0e639c;      /* button blue */
+  --color-accent-hover: #1177bb;
+  --color-accent-fg: #ffffff;
+  --color-focus: #007acc;       /* focus border */
+  --color-selection: #094771;
+  --color-hover: #2a2d2e;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+/* Scrollbar tuning to feel native-ish inside the webview. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.4 0.01 60);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

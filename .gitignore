@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+frontend/dist/
+.vite/
+*.log
+
+# Build artifacts
+dist/
+build/
+*.spec
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local secrets
+.env
+.env.local
+*.local
+
+# pywebview cache
+.pywebview/
+
+# Generated CAD artifacts not under user control
+*.gltf.cache
+
+# Claude Code local project state
+.claude/

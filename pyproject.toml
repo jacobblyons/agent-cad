@@ -1,0 +1,31 @@
+[project]
+name = "agent-cad"
+version = "0.0.1"
+description = "LLM-driven parametric CAD desktop app"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "pywebview>=5.3",
+    "cadquery>=2.5",
+    "claude-agent-sdk>=0.1",
+    "pillow>=10.0",
+    "trimesh>=4.4",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pyinstaller>=6.10",
+    "ruff>=0.6",
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
