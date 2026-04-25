@@ -13,6 +13,7 @@ node_modules/
 frontend/dist/
 .vite/
 *.log
+*.tsbuildinfo
 
 # Build artifacts
 dist/
