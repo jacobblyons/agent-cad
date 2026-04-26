@@ -3,6 +3,12 @@
 LLM-driven parametric CAD desktop app. Claude drives CADQuery; you see and
 edit the model in a Claude-style chat + 3D viewer UI.
 
+### Agentic coding experience with CAD specific tooling
+- agent can download reference models, research dimensions, make plans, and more.
+<img width="1248" height="1027" alt="image" src="https://github.com/user-attachments/assets/21002111-1e06-4bb4-9524-ca8882df7a8e" />
+
+
+
 ## Stack
 - **Python 3.12** — host process
 - **CADQuery** — geometry kernel (OCCT under the hood)
