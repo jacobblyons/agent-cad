@@ -72,6 +72,21 @@ class Settings:
     model: str = DEFAULT_MODEL
     default_project_dir: str = str(DEFAULT_PROJECT_DIR)
     effort: str = DEFAULT_EFFORT
+    # Optional Sketchfab integration. The token is kept locally on disk and
+    # only ever sent to sketchfab.com (and only when the agent uses one of
+    # the sketchfab_* tools).
+    sketchfab_enabled: bool = False
+    sketchfab_token: str = ""
+    # Experimental Playwright integration — gives the agent a real browser
+    # for looking up datasheet pages, navigating manufacturer sites, etc.
+    # Spawned via `npx -y @playwright/mcp@latest`, so it requires Node.js
+    # on PATH and pulls down its own Chromium install on first use.
+    playwright_enabled: bool = False
+    # When true, every Playwright tool call pauses the agent and shows a
+    # permission card in the chat with Approve / Deny. When false, the
+    # agent runs Playwright tools without asking. CAD tools are always
+    # auto-allowed regardless of this setting.
+    playwright_require_permission: bool = True
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -90,6 +105,12 @@ def load() -> Settings:
         model=d.get("model", DEFAULT_MODEL),
         default_project_dir=d.get("default_project_dir", str(DEFAULT_PROJECT_DIR)),
         effort=d.get("effort", DEFAULT_EFFORT),
+        sketchfab_enabled=bool(d.get("sketchfab_enabled", False)),
+        sketchfab_token=str(d.get("sketchfab_token", "") or ""),
+        playwright_enabled=bool(d.get("playwright_enabled", False)),
+        playwright_require_permission=bool(
+            d.get("playwright_require_permission", True)
+        ),
     )
 
 

@@ -268,6 +268,10 @@ class Project:
         return self.path / "sketches"
 
     @property
+    def imports_dir(self) -> Path:
+        return self.path / "imports"
+
+    @property
     def state_path(self) -> Path:
         return self.path / "state.json"
 
@@ -645,6 +649,146 @@ class Project:
         if dirty:
             self._write_state(state)
 
+    # --- imports ------------------------------------------------------
+    #
+    # Imports are user-supplied reference models (STEP only for now). They
+    # never become the active artifact — they're not editable, just there
+    # for the agent to measure off and boolean against. Stored verbatim
+    # under imports/<name>.step; the agent gets them as an `imports` dict
+    # of cq.Workplanes when running an object script.
+
+    # B-rep formats give the agent full boolean + measurement support;
+    # STL is mesh-only (display + bbox work, booleans don't). Keep this
+    # in sync with _import_loader.SUPPORTED_EXTS.
+    SUPPORTED_IMPORT_EXTS = {
+        ".step", ".stp",
+        ".iges", ".igs",
+        ".brep", ".brp",
+        ".stl",
+        ".glb", ".gltf",
+        ".3mf",
+    }
+
+    def _ensure_imports_dir(self) -> None:
+        self.imports_dir.mkdir(parents=True, exist_ok=True)
+
+    def list_imports(self) -> list[dict]:
+        """Every import in the project, ordered alphabetically by name."""
+        if not self.imports_dir.is_dir():
+            return []
+        out: list[dict] = []
+        for p in sorted(self.imports_dir.iterdir()):
+            if not p.is_file():
+                continue
+            if p.suffix.lower() not in self.SUPPORTED_IMPORT_EXTS:
+                continue
+            out.append(self._import_meta(p))
+        return out
+
+    def _import_meta(self, source_path: Path) -> dict:
+        try:
+            mtime = source_path.stat().st_mtime
+            size = source_path.stat().st_size
+        except OSError:
+            mtime = 0.0
+            size = 0
+        return {
+            "name": source_path.stem,
+            "ext": source_path.suffix.lstrip(".").lower(),
+            "modified": mtime,
+            "size_bytes": size,
+            "visible": self.is_import_visible(source_path.stem),
+        }
+
+    def import_exists(self, name: str) -> bool:
+        return self.import_source_path(name) is not None
+
+    def import_source_path(self, name: str) -> Path | None:
+        """First file matching a supported extension. None if not present."""
+        if not self.imports_dir.is_dir():
+            return None
+        for ext in self.SUPPORTED_IMPORT_EXTS:
+            cand = self.imports_dir / f"{name}{ext}"
+            if cand.exists():
+                return cand
+        return None
+
+    def is_import_visible(self, name: str) -> bool:
+        vis = self._read_state().get("import_visibility") or {}
+        return vis.get(name, True)
+
+    def set_import_visible(self, name: str, visible: bool) -> None:
+        if not self.import_exists(name):
+            raise FileNotFoundError(f"import '{name}' does not exist")
+        state = self._read_state()
+        vis = dict(state.get("import_visibility") or {})
+        if visible:
+            vis.pop(name, None)
+        else:
+            vis[name] = False
+        state["import_visibility"] = vis
+        self._write_state(state)
+
+    def create_import(self, source_file: Path, name: str | None = None) -> str:
+        """Copy an external STEP file into imports/<name>.<ext>.
+
+        `name` defaults to the file's stem (sanitized). If a sketch / object
+        with that name already exists in their respective namespace it's
+        fine — the import namespace is independent.
+        """
+        source_file = Path(source_file).expanduser().resolve()
+        if not source_file.exists():
+            raise FileNotFoundError(f"file not found: {source_file}")
+        ext = source_file.suffix.lower()
+        if ext not in self.SUPPORTED_IMPORT_EXTS:
+            raise ValueError(
+                f"unsupported import format {ext!r}; expected one of "
+                f"{sorted(self.SUPPORTED_IMPORT_EXTS)}"
+            )
+        safe = sanitize_object_name(name or source_file.stem)
+        if not safe:
+            raise ValueError("import name cannot be empty")
+        self._ensure_imports_dir()
+        # Refuse to clobber an existing import with the same name (any ext).
+        if self.import_exists(safe):
+            raise FileExistsError(f"import '{safe}' already exists")
+        target = self.imports_dir / f"{safe}{ext}"
+        shutil.copyfile(str(source_file), str(target))
+        return safe
+
+    def rename_import(self, old: str, new: str) -> str:
+        safe = sanitize_object_name(new)
+        if not safe:
+            raise ValueError("import name cannot be empty")
+        if safe == old:
+            return safe
+        src = self.import_source_path(old)
+        if src is None:
+            raise FileNotFoundError(f"import '{old}' does not exist")
+        if self.import_exists(safe):
+            raise FileExistsError(f"import '{safe}' already exists")
+        dst = self.imports_dir / f"{safe}{src.suffix}"
+        shutil.move(str(src), str(dst))
+        state = self._read_state()
+        vis = dict(state.get("import_visibility") or {})
+        if old in vis:
+            vis[safe] = vis.pop(old)
+            state["import_visibility"] = vis
+            self._write_state(state)
+        return safe
+
+    def delete_import(self, name: str) -> None:
+        src = self.import_source_path(name)
+        if src is None:
+            raise FileNotFoundError(f"import '{name}' does not exist")
+        src.unlink()
+        state = self._read_state()
+        vis = dict(state.get("import_visibility") or {})
+        if name in vis:
+            vis.pop(name)
+            state["import_visibility"] = vis
+            self._write_state(state)
+
     # --- active-artifact pointer --------------------------------------
 
     def _read_state(self) -> dict:
@@ -852,6 +996,7 @@ class Project:
         kind = self.active_kind()
         objects = self.list_objects()
         sketches = self.list_sketches()
+        imports = self.list_imports()
         # Surface the active artifact's own params (not merged) — the Tweaks
         # panel edits the file the user / agent is currently working on.
         if kind == "sketch" and active_skt is not None:
@@ -868,6 +1013,7 @@ class Project:
             "commits": [c.to_json() for c in commits],
             "objects": objects,
             "sketches": sketches,
+            "imports": imports,
             "active_kind": kind,
             "active_object": active_obj,
             "active_sketch": active_skt,

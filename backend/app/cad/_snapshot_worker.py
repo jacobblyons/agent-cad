@@ -13,6 +13,7 @@ Argv:
     6 = output PNG path
     7 = output JSON path  (always written; ok=True/False)
     8 = sketches manifest path (optional; '-' = none)
+    9 = imports manifest path  (optional; '-' = none)
 """
 from __future__ import annotations
 
@@ -34,6 +35,9 @@ def main() -> int:
     sketches_manifest = (
         Path(sys.argv[8]) if len(sys.argv) > 8 and sys.argv[8] != "-" else None
     )
+    imports_manifest = (
+        Path(sys.argv[9]) if len(sys.argv) > 9 and sys.argv[9] != "-" else None
+    )
 
     result: dict = {"ok": False, "error": None}
     try:
@@ -53,10 +57,16 @@ def main() -> int:
 
         from app.cad._sketch_loader import load_sketches_from_manifest
         sketches = load_sketches_from_manifest(sketches_manifest)
+        from app.cad._import_loader import load_imports_from_manifest
+        imports = load_imports_from_manifest(imports_manifest)
 
         globs = runpy.run_path(
             str(script_path),
-            init_globals={"params": params, "sketches": sketches},
+            init_globals={
+                "params": params,
+                "sketches": sketches,
+                "imports": imports,
+            },
         )
         model = globs.get("model")
         if model is None:

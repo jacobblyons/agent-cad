@@ -29,6 +29,14 @@ export type SketchMeta = {
   visible: boolean;
 };
 
+export type ImportMeta = {
+  name: string;
+  ext: string;            // "step" or "stp"
+  modified: number;
+  size_bytes: number;
+  visible: boolean;
+};
+
 /** Whether the active edit target is an object or a sketch. */
 export type ActiveKind = "object" | "sketch";
 
@@ -42,6 +50,7 @@ export type DocSummary = {
   commits: Commit[];
   objects: ObjectMeta[];
   sketches: SketchMeta[];
+  imports: ImportMeta[];
   active_object: string;
   active_sketch: string | null;
   active_kind: ActiveKind;

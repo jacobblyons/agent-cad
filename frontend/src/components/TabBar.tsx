@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  Download,
   FolderOpen,
   Loader2,
   Plus,
@@ -22,6 +23,23 @@ export function TabBar() {
   const ui = useUi();
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  const exportCombined = async () => {
+    if (!doc || exporting) return;
+    setExporting(true);
+    try {
+      const r = await call<{ ok: boolean; error?: string; cancelled?: boolean }>(
+        "project_export_combined",
+        doc.id,
+      );
+      if (!r?.ok && !r?.cancelled) {
+        window.alert(`Export failed: ${r?.error ?? "unknown error"}`);
+      }
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const refresh = async () => {
     if (!doc || refreshing) return;
@@ -122,6 +140,13 @@ export function TabBar() {
             {doc.head_branch} · {doc.head_sha.slice(0, 7)}
           </span>
         )}
+        <ToolbarBtn
+          onClick={exportCombined}
+          disabled={!doc || exporting}
+          title="Export every visible object as STL / STEP / BREP"
+        >
+          <Download size={13} className={cn(exporting && "animate-pulse")} />
+        </ToolbarBtn>
         <ToolbarBtn
           onClick={save}
           disabled={!doc || saving}

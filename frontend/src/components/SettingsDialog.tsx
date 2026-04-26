@@ -3,7 +3,15 @@ import { FolderOpen } from "lucide-react";
 import { call } from "@/lib/pywebview";
 import { Dialog, FieldLabel, PrimaryButton, SecondaryButton, TextInput } from "./Dialog";
 
-type Settings = { model: string; default_project_dir: string; effort: string };
+type Settings = {
+  model: string;
+  default_project_dir: string;
+  effort: string;
+  sketchfab_enabled: boolean;
+  sketchfab_token: string;
+  playwright_enabled: boolean;
+  playwright_require_permission: boolean;
+};
 type ModelOpt = { id: string; label: string; tier: string };
 type EffortOpt = { id: string; label: string };
 type GetResponse = {
@@ -123,6 +131,91 @@ export function SettingsDialog({ open, onClose }: Props) {
               Where new projects get created. Existing projects keep their original
               location.
             </p>
+          </div>
+
+          <div className="mt-4 border-t border-[var(--color-border)] pt-4">
+            <label className="flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={draft.sketchfab_enabled}
+                onChange={(e) =>
+                  setDraft({ ...draft, sketchfab_enabled: e.target.checked })
+                }
+                className="h-3.5 w-3.5 cursor-pointer"
+              />
+              <span className="text-sm text-[var(--color-text)]">
+                Enable Sketchfab integration
+              </span>
+            </label>
+            <p className="mt-1 text-xs text-[var(--color-muted)]">
+              Lets the agent search Sketchfab for reference parts, view
+              previews, and download STEP files into the project's imports.
+              Requires a personal API token from{" "}
+              <span className="font-mono">sketchfab.com/settings/password</span>.
+              The token stays on disk in your settings file and is only sent
+              to sketchfab.com.
+            </p>
+            {draft.sketchfab_enabled && (
+              <div className="mt-2">
+                <FieldLabel>Sketchfab API token</FieldLabel>
+                <TextInput
+                  type="password"
+                  value={draft.sketchfab_token}
+                  onChange={(e) =>
+                    setDraft({ ...draft, sketchfab_token: e.target.value })
+                  }
+                  placeholder="paste your token here"
+                  spellCheck={false}
+                />
+              </div>
+            )}
+          </div>
+
+          <div className="mt-4 border-t border-[var(--color-border)] pt-4">
+            <label className="flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={draft.playwright_enabled}
+                onChange={(e) =>
+                  setDraft({ ...draft, playwright_enabled: e.target.checked })
+                }
+                className="h-3.5 w-3.5 cursor-pointer"
+              />
+              <span className="text-sm text-[var(--color-text)]">
+                Enable Playwright browser{" "}
+                <span className="ml-1 rounded-sm bg-[var(--color-hover)] px-1 text-[10px] uppercase tracking-wider text-[var(--color-muted)]">
+                  experimental
+                </span>
+              </span>
+            </label>
+            <p className="mt-1 text-xs text-[var(--color-muted)]">
+              Spawns <span className="font-mono">@playwright/mcp</span> via npx so
+              the agent can navigate real websites — useful for product configurators,
+              login-walled datasheets, and pages WebFetch can't render. Requires
+              Node.js on PATH; first run downloads its own Chromium build.
+            </p>
+            {draft.playwright_enabled && (
+              <label className="mt-2 flex cursor-pointer items-start gap-2">
+                <input
+                  type="checkbox"
+                  checked={draft.playwright_require_permission}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      playwright_require_permission: e.target.checked,
+                    })
+                  }
+                  className="mt-0.5 h-3.5 w-3.5 cursor-pointer"
+                />
+                <span className="text-sm text-[var(--color-text)]">
+                  Ask before each browser action
+                  <span className="block text-xs text-[var(--color-muted)]">
+                    Show a permission card in the chat for every Playwright
+                    tool call. Turn this off to let the agent navigate freely.
+                  </span>
+                </span>
+              </label>
+            )}
           </div>
 
           {error && (

@@ -11,11 +11,13 @@ from pathlib import Path
 
 import webview
 
-from . import __version__, settings
+from . import __version__, permissions, settings
 from .cad.project import Project, list_recent
 from .cad.script_runner import (
     RunResult,
+    export_models as export_models_script,
     run as run_script,
+    tessellate_import as tessellate_import_script,
     tessellate_sketch as tessellate_sketch_script,
 )
 from .events import bus
@@ -32,6 +34,17 @@ def _sketches_manifest(project: Project) -> list[dict]:
         }
         for s in project.list_sketches()
     ]
+
+
+def _imports_manifest(project: Project) -> list[dict]:
+    """Manifest entries for every STEP import in this project."""
+    out: list[dict] = []
+    for i in project.list_imports():
+        path = project.import_source_path(i["name"])
+        if path is None:
+            continue
+        out.append({"name": i["name"], "path": str(path)})
+    return out
 
 
 class JsApi:
@@ -71,6 +84,19 @@ class JsApi:
         if not result:
             return {"ok": False, "cancelled": True}
         return {"ok": True, "path": result[0]}
+
+    def pick_file(self, file_types: list[str] | None = None) -> dict:
+        """Open a file picker; return the chosen file path. `file_types` is a
+        list of strings like ['STEP files (*.step;*.stp)']."""
+        window = webview.windows[0] if webview.windows else None
+        if window is None:
+            return {"ok": False, "error": "no window"}
+        types = tuple(file_types) if file_types else ()
+        result = window.create_file_dialog(webview.OPEN_DIALOG, file_types=types)
+        if not result:
+            return {"ok": False, "cancelled": True}
+        path = result if isinstance(result, str) else result[0]
+        return {"ok": True, "path": path}
 
     # --- projects ------------------------------------------------------
 
@@ -198,6 +224,92 @@ class JsApi:
             return {"ok": False, "error": str(e)}
         bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
         return {"ok": True, "sha": sha}
+
+    def project_export_object(self, project_id: str, name: str) -> dict:
+        """Export one object as STL / STEP / BREP. Opens a save dialog;
+        format is inferred from the chosen extension."""
+        proj = self._projects.get(project_id)
+        if proj is None:
+            return {"ok": False, "error": "not_found"}
+        if not proj.object_exists(name):
+            return {"ok": False, "error": f"object {name!r} does not exist"}
+        window = webview.windows[0] if webview.windows else None
+        if window is None:
+            return {"ok": False, "error": "no window"}
+        result = window.create_file_dialog(
+            webview.SAVE_DIALOG,
+            save_filename=f"{name}.stl",
+            file_types=(
+                "STL — 3D printing (*.stl)",
+                "STEP — parametric CAD (*.step)",
+                "3MF — modern STL replacement (*.3mf)",
+                "BREP — OpenCascade native (*.brep)",
+            ),
+        )
+        if not result:
+            return {"ok": False, "cancelled": True}
+        path = Path(result if isinstance(result, str) else result[0])
+        items = [{
+            "name": name,
+            "script": str(proj.object_source_path(name)),
+            "params": str(proj.object_params_path(name)),
+        }]
+        try:
+            er = export_models_script(
+                items, path, cwd=proj.path,
+                sketches=_sketches_manifest(proj),
+                imports=_imports_manifest(proj),
+            )
+        except Exception as e:
+            return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
+        if not er.ok:
+            return {"ok": False, "error": er.error, "stderr": er.stderr}
+        return {"ok": True, "path": str(path)}
+
+    def project_export_combined(self, project_id: str) -> dict:
+        """Export every visible object unioned into a single file. Opens
+        a save dialog; format is inferred from the chosen extension."""
+        proj = self._projects.get(project_id)
+        if proj is None:
+            return {"ok": False, "error": "not_found"}
+        visible = [o for o in proj.list_objects() if o.get("visible", True)]
+        if not visible:
+            return {"ok": False, "error": "no visible objects to export"}
+        window = webview.windows[0] if webview.windows else None
+        if window is None:
+            return {"ok": False, "error": "no window"}
+        result = window.create_file_dialog(
+            webview.SAVE_DIALOG,
+            save_filename=f"{proj.title}.stl",
+            file_types=(
+                "STL — 3D printing (*.stl)",
+                "STEP — parametric CAD (*.step)",
+                "3MF — modern STL replacement (*.3mf)",
+                "BREP — OpenCascade native (*.brep)",
+            ),
+        )
+        if not result:
+            return {"ok": False, "cancelled": True}
+        path = Path(result if isinstance(result, str) else result[0])
+        items = [
+            {
+                "name": o["name"],
+                "script": str(proj.object_source_path(o["name"])),
+                "params": str(proj.object_params_path(o["name"])),
+            }
+            for o in visible
+        ]
+        try:
+            er = export_models_script(
+                items, path, cwd=proj.path,
+                sketches=_sketches_manifest(proj),
+                imports=_imports_manifest(proj),
+            )
+        except Exception as e:
+            return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
+        if not er.ok:
+            return {"ok": False, "error": er.error, "stderr": er.stderr}
+        return {"ok": True, "path": str(path), "objects": [o["name"] for o in visible]}
 
     def project_export_zip(self, project_id: str) -> dict:
         proj = self._projects.get(project_id)
@@ -370,6 +482,82 @@ class JsApi:
         bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
         return {"ok": True, "project": proj.to_json()}
 
+    # --- imports -------------------------------------------------------
+
+    def import_pick_and_create(self, project_id: str, name: str | None = None) -> dict:
+        """Open a file picker for supported model files, copy the chosen
+        file in as a new import, and tessellate it for the viewer.
+        `name` overrides the default filename-based name."""
+        proj = self._projects.get(project_id)
+        if proj is None:
+            return {"ok": False, "error": "not_found"}
+        picked = self.pick_file([
+            "All supported (*.step;*.stp;*.iges;*.igs;*.brep;*.brp;*.stl;*.glb;*.gltf;*.3mf)",
+            "STEP (*.step;*.stp)",
+            "IGES (*.iges;*.igs)",
+            "BREP (*.brep;*.brp)",
+            "STL (*.stl)",
+            "glTF / GLB (*.glb;*.gltf)",
+            "3MF (*.3mf)",
+        ])
+        if not picked.get("ok"):
+            return picked
+        try:
+            safe = proj.create_import(Path(picked["path"]), name=name)
+        except (ValueError, FileExistsError, FileNotFoundError) as e:
+            return {"ok": False, "error": str(e)}
+        self._emit_import_geometry(proj, safe)
+        # Imports may be referenced by visible objects; re-render so the
+        # viewer reflects any boolean ops that touch the new import.
+        for o in proj.list_objects():
+            if o.get("visible", True):
+                self._emit_object_geometry(proj, o["name"])
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+        return {"ok": True, "name": safe, "project": proj.to_json()}
+
+    def import_rename(self, project_id: str, old: str, new: str) -> dict:
+        proj = self._projects.get(project_id)
+        if proj is None:
+            return {"ok": False, "error": "not_found"}
+        try:
+            safe = proj.rename_import(old, new)
+        except (ValueError, FileExistsError, FileNotFoundError) as e:
+            return {"ok": False, "error": str(e)}
+        if safe != old:
+            self._emit_import_geometry(proj, safe)
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+        return {"ok": True, "name": safe, "project": proj.to_json()}
+
+    def import_delete(self, project_id: str, name: str) -> dict:
+        proj = self._projects.get(project_id)
+        if proj is None:
+            return {"ok": False, "error": "not_found"}
+        try:
+            proj.delete_import(name)
+        except FileNotFoundError as e:
+            return {"ok": False, "error": str(e)}
+        bus.emit("doc_import_geometry", {
+            "doc_id": proj.id, "import": name, "ok": False, "deleted": True,
+        })
+        for o in proj.list_objects():
+            if o.get("visible", True):
+                self._emit_object_geometry(proj, o["name"])
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+        return {"ok": True, "project": proj.to_json()}
+
+    def import_set_visible(self, project_id: str, name: str, visible: bool) -> dict:
+        proj = self._projects.get(project_id)
+        if proj is None:
+            return {"ok": False, "error": "not_found"}
+        try:
+            proj.set_import_visible(name, bool(visible))
+        except FileNotFoundError as e:
+            return {"ok": False, "error": str(e)}
+        if visible:
+            self._emit_import_geometry(proj, name)
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+        return {"ok": True, "project": proj.to_json()}
+
     # --- timeline ------------------------------------------------------
 
     def timeline_checkout(self, project_id: str, ref: str) -> dict:
@@ -393,6 +581,16 @@ class JsApi:
             return {"ok": True, "branch": branch, "project": proj.to_json()}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    # --- permissions ---------------------------------------------------
+
+    def permission_resolve(self, request_id: str, approved: bool,
+                           message: str = "") -> dict:
+        """Resolve a pending tool-permission request from the chat. The
+        agent's `can_use_tool` callback is blocked on a threading.Event
+        for this request; this call sets the result and unblocks it."""
+        ok = permissions.store.resolve(request_id, bool(approved), str(message or ""))
+        return {"ok": ok}
 
     # --- chat / agent --------------------------------------------------
 
@@ -422,6 +620,7 @@ class JsApi:
                 cwd=project.path,
                 timeout=30.0,
                 sketches=_sketches_manifest(project),
+                imports=_imports_manifest(project),
             )
         except Exception as e:
             bus.emit("doc_geometry", {
@@ -434,6 +633,39 @@ class JsApi:
         bus.emit("doc_geometry", {
             "doc_id": project.id,
             "object": name,
+            "ok": result.ok,
+            "error": result.error,
+            "stderr": result.stderr,
+            "meta": result.meta,
+            "glb_b64": result.glb_b64,
+            "topology": result.topology,
+        })
+
+    def _emit_import_geometry(self, project: Project, name: str) -> None:
+        """Tessellate one import's STEP file and push GLB to the viewer."""
+        source = project.import_source_path(name)
+        if source is None:
+            bus.emit("doc_import_geometry", {
+                "doc_id": project.id,
+                "import": name,
+                "ok": False,
+                "error": f"import '{name}' not found on disk",
+            })
+            return
+        try:
+            result = tessellate_import_script(source, cwd=project.path, timeout=60.0)
+        except Exception as e:
+            bus.emit("doc_import_geometry", {
+                "doc_id": project.id,
+                "import": name,
+                "ok": False,
+                "error": f"tessellate failed: {e}",
+                "trace": traceback.format_exc(),
+            })
+            return
+        bus.emit("doc_import_geometry", {
+            "doc_id": project.id,
+            "import": name,
             "ok": result.ok,
             "error": result.error,
             "stderr": result.stderr,
@@ -471,17 +703,16 @@ class JsApi:
         })
 
     def _emit_all_visible_geometry(self, project: Project) -> None:
-        """Render every visible artifact (objects + sketches) and emit
-        per-item geometry events. Sketches are tessellated first so the
-        objects that consume them see fresh geometry on their own runs."""
-        # Sketches don't depend on each other, so order within the group is
-        # arbitrary — but they MUST come before objects that may consume them
-        # (the object runner reads each sketch's source on every invocation,
-        # so this isn't strictly required for correctness, just for ordering
-        # of the events the viewer sees).
+        """Render every visible artifact (sketches + imports + objects) and
+        emit per-item geometry events. Sketches and imports are emitted
+        before objects so the agent's reference geometry has loaded by the
+        time the object runner pulls it in."""
         for s in project.list_sketches():
             if s.get("visible", True):
                 self._emit_sketch_geometry(project, s["name"])
+        for i in project.list_imports():
+            if i.get("visible", True):
+                self._emit_import_geometry(project, i["name"])
         for o in project.list_objects():
             if o.get("visible", True):
                 self._emit_object_geometry(project, o["name"])

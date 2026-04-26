@@ -10,6 +10,7 @@ import {
   formatPinForPrompt,
   formatPinForUser,
   type ChatBlock,
+  type ChatPermissionBlock,
   type ChatImage,
   type ChatToolBlock,
   type PinInfo,
@@ -39,6 +40,33 @@ type SketchGeometryEvent = {
   deleted?: boolean;
   polylines?: { points: [number, number, number][]; closed: boolean }[] | null;
   plane?: import("@/lib/viewer").SketchGeometry["plane"];
+};
+
+type ImportGeometryEvent = {
+  doc_id: string;
+  import: string;
+  ok?: boolean;
+  error?: string;
+  deleted?: boolean;
+  glb_b64?: string;
+  topology?: import("@/lib/viewer").Topology | null;
+};
+
+type PermissionRequestEvent = {
+  doc_id: string;
+  msg_id: string;
+  request_id: string;
+  tool: string;
+  input: unknown;
+  tool_use_id?: string;
+};
+
+type PermissionResolvedEvent = {
+  doc_id: string;
+  msg_id: string;
+  request_id: string;
+  approved: boolean;
+  message?: string;
 };
 
 type ChatEvent = {
@@ -80,7 +108,9 @@ export default function App() {
           turns: [],
           geometry: {},
           sketchGeometry: {},
+          importGeometry: {},
           pendingAttachments: [],
+          todos: [],
         },
       ];
     });
@@ -283,11 +313,85 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    return on<ImportGeometryEvent>("doc_import_geometry", (p) => {
+      setTabs((cur) =>
+        cur.map((t) => {
+          if (t.doc.id !== p.doc_id) return t;
+          if (p.deleted) {
+            const next = { ...t.importGeometry };
+            delete next[p.import];
+            return { ...t, importGeometry: next };
+          }
+          const prev = t.importGeometry[p.import] ?? {
+            glbB64: null,
+            topology: null,
+            errorMsg: null,
+          };
+          return {
+            ...t,
+            importGeometry: {
+              ...t.importGeometry,
+              [p.import]: {
+                glbB64: p.glb_b64 ?? prev.glbB64,
+                topology: p.topology ?? prev.topology,
+                errorMsg: p.error ?? null,
+              },
+            },
+          };
+        }),
+      );
+    });
+  }, []);
+
+  useEffect(() => {
+    return on<PermissionRequestEvent>("permission_request", (p) => {
+      setTabs((cur) =>
+        cur.map((t) => {
+          if (t.doc.id !== p.doc_id) return t;
+          return { ...t, turns: appendPermissionBlock(t.turns, p) };
+        }),
+      );
+    });
+  }, []);
+
+  useEffect(() => {
+    return on<PermissionResolvedEvent>("permission_resolved", (p) => {
+      setTabs((cur) =>
+        cur.map((t) => {
+          if (t.doc.id !== p.doc_id) return t;
+          return { ...t, turns: updatePermissionStatus(t.turns, p) };
+        }),
+      );
+    });
+  }, []);
+
+  useEffect(() => {
     return on<ChatEvent>("chat_event", (e) => {
       setTabs((cur) =>
-        cur.map((t) =>
-          t.doc.id === e.doc_id ? { ...t, turns: applyChatEvent(t.turns, e) } : t,
-        ),
+        cur.map((t) => {
+          if (t.doc.id !== e.doc_id) return t;
+          const next: TabState = { ...t, turns: applyChatEvent(t.turns, e) };
+          // Mirror TodoWrite calls into per-tab `todos` so the chat panel
+          // can render a live task list as the agent works.
+          if (e.kind === "tool_use" && e.tool === "TodoWrite") {
+            const input = (e.input ?? {}) as { todos?: unknown };
+            const items = Array.isArray(input.todos) ? input.todos : [];
+            next.todos = items
+              .filter((it): it is Record<string, unknown> =>
+                typeof it === "object" && it !== null,
+              )
+              .map((it) => ({
+                content: String(it.content ?? ""),
+                status:
+                  it.status === "in_progress" || it.status === "completed"
+                    ? it.status
+                    : "pending",
+                activeForm:
+                  typeof it.activeForm === "string" ? it.activeForm : undefined,
+              }));
+          }
+          return next;
+        }),
       );
     });
   }, []);
@@ -361,13 +465,20 @@ export default function App() {
       pendingAttachments: activeTab?.pendingAttachments ?? [],
       addAttachment,
       removeAttachment,
+      todos: activeTab?.todos ?? [],
     }),
     [activeTab, isAgentRunning, send, addAttachment, removeAttachment],
   );
 
   const viewerCtx = useMemo(() => {
     if (!activeTab) {
-      return { visible: [], visibleSketches: [], activeName: null, errorMsg: null };
+      return {
+        visible: [],
+        visibleSketches: [],
+        visibleImports: [],
+        activeName: null,
+        errorMsg: null,
+      };
     }
     const objects = activeTab.doc.objects ?? [];
     const visible = objects
@@ -391,11 +502,22 @@ export default function App() {
           errorMsg: null,
         },
       }));
+    const imports = activeTab.doc.imports ?? [];
+    const visibleImports = imports
+      .filter((i) => i.visible)
+      .map((i) => ({
+        name: i.name,
+        geometry: activeTab.importGeometry[i.name] ?? {
+          glbB64: null,
+          topology: null,
+          errorMsg: null,
+        },
+      }));
     const activeName = activeTab.doc.active_object ?? null;
     const errorMsg = activeName
       ? activeTab.geometry[activeName]?.errorMsg ?? null
       : null;
-    return { visible, visibleSketches, activeName, errorMsg };
+    return { visible, visibleSketches, visibleImports, activeName, errorMsg };
   }, [activeTab]);
 
   return (
@@ -430,6 +552,45 @@ export default function App() {
       </TabsContext.Provider>
     </UiContext.Provider>
   );
+}
+
+/**
+ * Append a permission-pending block to the running assistant turn for
+ * `msg_id`. If no turn exists yet (rare race), spin one up so the card
+ * shows up regardless.
+ */
+function appendPermissionBlock(cur: Turn[], p: PermissionRequestEvent): Turn[] {
+  const idx = cur.findIndex((t) => t.id === p.msg_id && t.role === "assistant");
+  const base: Turn =
+    idx >= 0
+      ? cur[idx]
+      : { id: p.msg_id, role: "assistant", blocks: [], status: "running" };
+  const turn = base as Extract<Turn, { role: "assistant" }>;
+  const block: ChatPermissionBlock = {
+    kind: "permission",
+    requestId: p.request_id,
+    tool: p.tool,
+    input: p.input,
+    toolUseId: p.tool_use_id,
+    status: "pending",
+  };
+  return upsertTurn(cur, { ...turn, blocks: [...turn.blocks, block] });
+}
+
+function updatePermissionStatus(cur: Turn[], p: PermissionResolvedEvent): Turn[] {
+  return cur.map((t) => {
+    if (t.role !== "assistant") return t;
+    const blocks = t.blocks.map((b) => {
+      if (b.kind !== "permission" || b.requestId !== p.request_id) return b;
+      const status: ChatPermissionBlock["status"] = p.message?.includes("timed out")
+        ? "timeout"
+        : p.approved
+          ? "approved"
+          : "denied";
+      return { ...b, status, message: p.message };
+    });
+    return { ...t, blocks };
+  });
 }
 
 function applyChatEvent(cur: Turn[], e: ChatEvent): Turn[] {

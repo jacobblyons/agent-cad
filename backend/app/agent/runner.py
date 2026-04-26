@@ -16,42 +16,134 @@ from typing import Any, Callable
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    PermissionResultAllow,
+    PermissionResultDeny,
     ResultMessage,
     ServerToolResultBlock,
     ServerToolUseBlock,
     TextBlock,
+    ToolPermissionContext,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
     query,
 )
 
-from .. import settings
+from .. import permissions, settings
 from ..cad.project import Project
 from ..cad.script_runner import RunResult
 from ..events import bus
-from .tools import ALL_TOOL_NAMES, CadToolset, build_cad_server
+from .tools import (
+    ALL_TOOL_NAMES,
+    CadToolset,
+    build_cad_server,
+)
+
+
+# Tool names the agent gets via @playwright/mcp. Lifted from the
+# server's documented surface; we keep them here so allowed_tools is
+# explicit and a future Playwright update doesn't silently change what
+# the agent can do.
+PLAYWRIGHT_TOOL_PREFIX = "mcp__playwright__"
+PLAYWRIGHT_TOOL_NAMES = [
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_close",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_resize",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_console_messages",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_handle_dialog",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_evaluate",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_file_upload",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_install",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_press_key",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_navigate",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_navigate_back",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_network_requests",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_take_screenshot",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_snapshot",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_click",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_drag",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_hover",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_select_option",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_tabs",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_type",
+    f"{PLAYWRIGHT_TOOL_PREFIX}browser_wait_for",
+]
+
+
+PLAYWRIGHT_PROMPT_BLOCK = """
+PLAYWRIGHT BROWSER (experimental, enabled):
+- mcp__playwright__browser_navigate / browser_click / browser_type /
+  browser_take_screenshot / etc. give you a real Chromium browser.
+  Use it for things WebFetch can't do: pages that need login, JS-heavy
+  product configurators, downloads behind a click, etc.
+- The user may have set "ask before each browser action" in Settings.
+  When that's on, every Playwright tool call pauses and shows the user
+  a permission card with the tool name and arguments. They can approve
+  or deny. Don't take it personally if a request is denied — just pick
+  a different approach.
+- After landing on a page, ALWAYS take a screenshot or browser_snapshot
+  before clicking — selectors based on visible content are far more
+  reliable than guessing aria-labels.
+- Close the browser when you're done with `browser_close` so it doesn't
+  linger.
+"""
+
+
+SKETCHFAB_PROMPT_BLOCK = """
+SKETCHFAB INTEGRATION (enabled):
+- mcp__cad__sketchfab_search — search the public catalogue for a
+  reference part by description; returns thumbnails you can SEE.
+- mcp__cad__sketchfab_view — drill into one uid for a larger preview
+  before committing to a download.
+- mcp__cad__sketchfab_download — pull the best available source file
+  (STEP > IGES > BREP > STL > GLB > glTF) into imports/. STEP/IGES/
+  BREP downloads support full booleans + measurements; STL/GLB/glTF
+  are mesh-only (bbox + viewer rendering, no booleans).
+- Most Sketchfab models are mesh-only (Blender exports). Treat their
+  bbox and the visible mesh as your measurement source; design the
+  user's part around those dimensions, don't try to boolean against
+  the mesh.
+- Workflow: search → view → download → import_inspect → use bbox /
+  visible reference when authoring the user's object.
+- Always pass `downloadable_only=true` to the search when the user
+  actually wants a usable reference (not just a thumbnail).
+"""
+
 
 SYSTEM_PROMPT_TEMPLATE = """You are a CAD design assistant inside Agent CAD, a parametric modeller built on CADQuery.
 
-A PROJECT in Agent CAD contains two kinds of artifact:
+A PROJECT in Agent CAD contains three kinds of artifact:
   - OBJECTS — CADQuery scripts under `objects/<name>.py` that define a
     top-level `model` (a cq.Workplane). These are the actual 3D parts.
   - SKETCHES — CADQuery scripts under `sketches/<name>.py` that define a
     top-level `sketch` (a cq.Sketch) and optionally `plane` (a workplane
     spec). Sketches are 2D profiles that live on a named plane in 3D
     space; they are first-class artifacts that object scripts consume.
+  - IMPORTS — user-supplied STEP files under `imports/<name>.step`. They
+    are READ-ONLY reference geometry: a real solid the agent can measure
+    off and boolean against, but never edit or recreate.
 
 Exactly one artifact is the *active edit target* at a time — either an
-object or a sketch. The Tweaks panel and Read/Edit/Write/run_model
-follow whichever is active. The viewer renders all visible objects as
-3D geometry AND all visible sketches as line overlays sitting on their
-declared planes.
+object or a sketch. (Imports are never active — they're inputs, not
+artifacts the agent authors.) The Tweaks panel and Read/Edit/Write/
+run_model follow whichever editable artifact is active. The viewer
+renders all visible objects + imports as 3D geometry, and all visible
+sketches as line overlays on their declared planes.
 
 Active edit target: **{active_kind}** {active_artifact}
 All objects:  {all_objects}
 All sketches: {all_sketches}
+All imports:  {all_imports}
 {requirements_section}
+
+USE IMPORTS BEFORE REBUILDING:
+  When the project has imports, treat them as the source of truth for
+  any geometry they cover. The user added them so you don't have to
+  reverse-engineer dimensions — measure off them with import_inspect or
+  consume them directly via the injected `imports` dict (e.g.
+  `model = base.cut(imports["bracket"])` for a clearance pocket,
+  `imports["bracket"].faces(">Z").val().BoundingBox()` for a face's
+  size). Do NOT recreate an imported part from scratch when it's already
+  available — that's the bug we explicitly want to avoid.
 
 SKETCH-FIRST WORKFLOW (the user expects this — don't skip):
   1. When the user asks for a part with a non-trivial 2D profile
@@ -135,6 +227,23 @@ Conventions:
 - Keep narration brief between tool calls. The user can see your tool
   calls; they don't need a play-by-play.
 
+Built-in tools you should reach for:
+- WebSearch + WebFetch — when the user asks for a part to a real-world
+  spec (M3 screw, USB-C connector, NEMA 17 stepper, common bearing,
+  threaded insert, etc.) and you don't already know the exact dimension,
+  LOOK IT UP. Search for the datasheet or standard, then fetch the
+  authoritative source. Do NOT guess dimensions — guessing produces
+  parts that don't fit, and the user has called this out as a recurring
+  bug.
+- TodoWrite — for any task that takes more than 2-3 tool calls, use
+  TodoWrite up front to lay out the steps, then mark each completed as
+  you finish. The user sees the live task list in the chat sidebar so
+  they can track progress.
+- AskUserQuestion — when a real ambiguity exists (which face? what
+  thickness? which standard?), ASK rather than guess. The chat surfaces
+  these questions prominently. Reserve this for genuine ambiguity, not
+  routine choices you can make and surface as commit messages.
+
 When the user clicks on the model, you'll see a message that starts with
 something like:
   [The user pointed at edge index 7 (geomType: CIRCLE) of the current model,
@@ -189,14 +298,85 @@ def _build_requirements_section(project: Project) -> str:
 def _build_system_prompt(project: Project) -> str:
     objs = [o["name"] for o in project.list_objects()]
     sketches = [s["name"] for s in project.list_sketches()]
+    imports = [i["name"] for i in project.list_imports()]
     kind, name = project.active_artifact()
-    return SYSTEM_PROMPT_TEMPLATE.format(
+    body = SYSTEM_PROMPT_TEMPLATE.format(
         active_kind=kind,
         active_artifact=name,
         all_objects=", ".join(objs) if objs else "(none yet)",
         all_sketches=", ".join(sketches) if sketches else "(none yet)",
+        all_imports=", ".join(imports) if imports else "(none yet)",
         requirements_section=_build_requirements_section(project),
     )
+    s = settings.load()
+    if s.sketchfab_enabled and s.sketchfab_token:
+        body += SKETCHFAB_PROMPT_BLOCK
+    if s.playwright_enabled:
+        body += PLAYWRIGHT_PROMPT_BLOCK
+    return body
+
+
+def _make_permission_callback(project: Project, msg_id: str):
+    """Build a can_use_tool callback that auto-allows our own CAD tools
+    + standard editor tools, and routes Playwright (or any other) tool
+    calls through the user via the chat permission card."""
+
+    async def callback(
+        tool_name: str,
+        tool_input: dict[str, Any],
+        context: ToolPermissionContext,
+    ):
+        # Always-allow surface: our own CAD tools and the SDK's safe
+        # built-ins. Anything else (currently just Playwright) needs
+        # explicit user approval.
+        if (
+            tool_name.startswith("mcp__cad__")
+            or tool_name in ("Read", "Write", "Edit", "Glob", "Grep",
+                             "WebSearch", "WebFetch", "TodoWrite",
+                             "AskUserQuestion")
+        ):
+            return PermissionResultAllow()
+
+        request_id, ev = permissions.store.request()
+        bus.emit("permission_request", {
+            "doc_id": project.id,
+            "msg_id": msg_id,
+            "request_id": request_id,
+            "tool": tool_name,
+            "input": _safe(tool_input),
+            "tool_use_id": context.tool_use_id,
+        })
+        # Wait off the asyncio loop so the permission UI can run.
+        # Five-minute timeout — long enough for the user to read carefully,
+        # short enough that an abandoned tab doesn't pin a worker forever.
+        got_signal = await asyncio.to_thread(ev.wait, 300)
+        if not got_signal:
+            permissions.store.cancel(request_id)
+            bus.emit("permission_resolved", {
+                "doc_id": project.id,
+                "msg_id": msg_id,
+                "request_id": request_id,
+                "approved": False,
+                "message": "request timed out",
+            })
+            return PermissionResultDeny(message="permission request timed out")
+
+        result = permissions.store.take_result(request_id)
+        approved = bool(result and result.approved)
+        bus.emit("permission_resolved", {
+            "doc_id": project.id,
+            "msg_id": msg_id,
+            "request_id": request_id,
+            "approved": approved,
+            "message": result.message if result else "",
+        })
+        if approved:
+            return PermissionResultAllow()
+        return PermissionResultDeny(
+            message=(result.message if result else "denied by user") or "denied by user",
+        )
+
+    return callback
 
 
 def run_chat_turn(
@@ -232,23 +412,44 @@ async def _run(project: Project, toolset: CadToolset, prompt: str,
                attachments: list[dict] | None, msg_id: str) -> None:
     server = build_cad_server(toolset)
     user_settings = settings.load()
+
+    mcp_servers: dict[str, Any] = {"cad": server}
+    allowed_tools = list(ALL_TOOL_NAMES)
+    if user_settings.playwright_enabled:
+        mcp_servers["playwright"] = {
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "@playwright/mcp@latest"],
+        }
+        allowed_tools = list(allowed_tools) + PLAYWRIGHT_TOOL_NAMES
+
+    # When the user wants permission prompts, install a can_use_tool
+    # callback that routes through the chat. CAD + safe builtins are
+    # auto-allowed inside the callback. The SDK requires streaming-mode
+    # input when can_use_tool is set, so we always wrap the prompt
+    # below.
+    can_use_tool = None
+    if user_settings.playwright_enabled and user_settings.playwright_require_permission:
+        can_use_tool = _make_permission_callback(project, msg_id)
+
     options = ClaudeAgentOptions(
         cwd=str(project.path),
-        mcp_servers={"cad": server},
-        allowed_tools=ALL_TOOL_NAMES,
+        mcp_servers=mcp_servers,
+        allowed_tools=allowed_tools,
         system_prompt=_build_system_prompt(project),
         permission_mode="bypassPermissions",
         model=user_settings.model,
         effort=user_settings.effort,  # type: ignore[arg-type]
+        can_use_tool=can_use_tool,
     )
 
     bus.emit("chat_event", {"doc_id": project.id, "msg_id": msg_id, "kind": "start"})
 
-    # Multimodal prompts (text + attached images) require streaming-mode
-    # input — string prompts can't carry image content blocks.
+    # Streaming-mode input is required when can_use_tool is set OR when
+    # the prompt has image attachments. Otherwise pass a plain string.
     query_prompt: Any
-    if attachments:
-        query_prompt = _stream_multimodal_prompt(prompt, attachments)
+    if can_use_tool is not None or attachments:
+        query_prompt = _stream_multimodal_prompt(prompt, attachments or [])
     else:
         query_prompt = prompt
 

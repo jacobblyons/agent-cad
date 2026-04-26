@@ -57,11 +57,22 @@ export type VisibleSketch = {
   geometry: SketchGeometry;
 };
 
+/** A STEP import's tessellation (mesh + topology), same shape as objects so
+ * the viewer can reuse the GLB rendering pipeline. */
+export type ImportGeometry = ObjectGeometry;
+
+export type VisibleImport = {
+  name: string;
+  geometry: ImportGeometry;
+};
+
 export type ViewerCtx = {
   // Each visible object's geometry, in display order.
   visible: VisibleObject[];
   // Each visible sketch's geometry, in display order.
   visibleSketches: VisibleSketch[];
+  // Each visible import's geometry, in display order.
+  visibleImports: VisibleImport[];
   // The active object's name — picking, pinning, and the error banner are scoped to it.
   activeName: string | null;
   // Active object's error, if any (surfaced as the banner).
@@ -71,6 +82,7 @@ export type ViewerCtx = {
 export const ViewerContext = createContext<ViewerCtx>({
   visible: [],
   visibleSketches: [],
+  visibleImports: [],
   activeName: null,
   errorMsg: null,
 });

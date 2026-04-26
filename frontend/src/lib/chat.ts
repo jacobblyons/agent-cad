@@ -33,6 +33,18 @@ export type ChatImage = {
   description?: string;
 };
 
+/**
+ * One item in the agent's TodoWrite task list. Whenever the agent calls
+ * the TodoWrite tool, the latest list is mirrored into the active tab's
+ * `todos` so the UI can render real-time progress.
+ */
+export type AgentTodo = {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+  /** Present-continuous form ("Loading the bracket model"); falls back to content. */
+  activeForm?: string;
+};
+
 export type ChatTextBlock = { kind: "text"; text: string };
 export type ChatToolBlock = {
   kind: "tool";
@@ -43,7 +55,21 @@ export type ChatToolBlock = {
   isError?: boolean;
   toolUseId?: string;
 };
-export type ChatBlock = ChatTextBlock | ChatToolBlock;
+/**
+ * Permission ask the agent is blocked on. The card renders Approve /
+ * Deny buttons; once the user clicks one we transition to status
+ * "approved" or "denied" and the agent's can_use_tool callback resumes.
+ */
+export type ChatPermissionBlock = {
+  kind: "permission";
+  requestId: string;
+  tool: string;
+  input: unknown;
+  toolUseId?: string;
+  status: "pending" | "approved" | "denied" | "timeout";
+  message?: string;
+};
+export type ChatBlock = ChatTextBlock | ChatToolBlock | ChatPermissionBlock;
 
 export type Turn =
   | { id: string; role: "user"; text: string; images?: ChatImage[] }
@@ -63,6 +89,8 @@ export type ChatCtx = {
   pendingAttachments: ChatImage[];
   addAttachment: (img: ChatImage) => void;
   removeAttachment: (index: number) => void;
+  /** Most recent task list the agent published via TodoWrite. */
+  todos: AgentTodo[];
 };
 
 export const ChatContext = createContext<ChatCtx>({
@@ -72,6 +100,7 @@ export const ChatContext = createContext<ChatCtx>({
   pendingAttachments: [],
   addAttachment: () => {},
   removeAttachment: () => {},
+  todos: [],
 });
 
 export const useChat = () => useContext(ChatContext);

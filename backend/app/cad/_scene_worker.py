@@ -35,12 +35,12 @@ import traceback
 from pathlib import Path
 
 
-def _load_item(item: dict, sketches: dict) -> dict:
+def _load_item(item: dict, sketches: dict, imports: dict) -> dict:
     """Run the script and pull out `model`. Returns {name, model}.
 
-    `sketches` is the per-project sketches dict (built once and reused for
-    every item) so all object scripts in the scene see the same sketches
-    that the live viewer sees.
+    `sketches` and `imports` are the per-project dicts (built once and
+    reused for every item) so all object scripts in the scene see the
+    same artifacts that the live viewer sees.
     """
     script = Path(item["script"])
     params_path = Path(item["params"])
@@ -54,7 +54,11 @@ def _load_item(item: dict, sketches: dict) -> dict:
             raise RuntimeError(f"params file is invalid: {e}") from e
     globs = runpy.run_path(
         str(script),
-        init_globals={"params": params, "sketches": sketches},
+        init_globals={
+            "params": params,
+            "sketches": sketches,
+            "imports": imports,
+        },
     )
     model = globs.get("model")
     if model is None:
@@ -128,15 +132,22 @@ def main() -> int:
         except OSError:
             pass
 
-        # Sketches are project-wide; build the dict once and let every loaded
-        # item see the same set the live viewer sees.
+        # Sketches + imports are project-wide; build the dicts once and let
+        # every loaded item see the same set the live viewer sees.
         from app.cad._sketch_loader import load_sketches_from_manifest
         sketches_manifest = spec.get("sketches_manifest")
         sketches = load_sketches_from_manifest(
             Path(sketches_manifest) if sketches_manifest else None
         )
+        from app.cad._import_loader import load_imports_from_manifest
+        imports_manifest = spec.get("imports_manifest")
+        imports = load_imports_from_manifest(
+            Path(imports_manifest) if imports_manifest else None
+        )
 
-        loaded = [_load_item(item, sketches) for item in spec.get("items", [])]
+        loaded = [
+            _load_item(item, sketches, imports) for item in spec.get("items", [])
+        ]
         if not loaded:
             result["error"] = "scene spec has no items"
             json_out.write_text(json.dumps(result), encoding="utf-8")
@@ -144,6 +155,37 @@ def main() -> int:
 
         post = spec.get("post")
         scene_items: list[dict]
+        # Export mode: union the loaded models and write to disk in the
+        # requested format. Skips render entirely.
+        if post and post.get("kind") == "export":
+            import cadquery as cq
+            out_path = Path(post["path"])
+            ext = out_path.suffix.lower()
+            ext_to_type = {
+                ".stl": "STL",
+                ".step": "STEP",
+                ".stp": "STEP",
+                ".brep": "BREP",
+                ".brp": "BREP",
+                # cadquery's exporter checks for the literal string "3MF",
+                # not the THREEMF enum name (the THREEMF attribute resolves
+                # to the value "3MF").
+                ".3mf": "3MF",
+            }
+            export_type = ext_to_type.get(ext)
+            if export_type is None:
+                raise ValueError(
+                    f"unsupported export extension {ext!r} "
+                    "(use .stl / .step / .brep / .3mf)"
+                )
+            target = loaded[0]["model"]
+            for item in loaded[1:]:
+                target = target.union(item["model"])
+            cq.exporters.export(target, str(out_path), exportType=export_type)
+            result["ok"] = True
+            json_out.write_text(json.dumps(result), encoding="utf-8")
+            return 0
+
         if not post or post.get("kind") in (None, "none"):
             # Render each loaded item with its own colour.
             from app.cad.snapshot import SCENE_COLORS

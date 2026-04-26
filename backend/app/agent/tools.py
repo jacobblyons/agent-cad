@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
+from .. import settings as user_settings
 from ..cad.project import Project
 from ..cad.script_runner import (
     RunResult,
@@ -50,6 +51,18 @@ def _sketches_manifest(project: Project) -> list[dict]:
     ]
 
 
+def _imports_manifest(project: Project) -> list[dict]:
+    """Manifest entries for every STEP import — same shape as
+    api._imports_manifest."""
+    out: list[dict] = []
+    for i in project.list_imports():
+        path = project.import_source_path(i["name"])
+        if path is None:
+            continue
+        out.append({"name": i["name"], "path": str(path)})
+    return out
+
+
 def _ok(text: str, extra: list[dict] | None = None) -> dict:
     content: list[dict] = [{"type": "text", "text": text}]
     if extra:
@@ -66,6 +79,28 @@ def _image_block(png_bytes: bytes) -> dict:
         "type": "image",
         "data": base64.b64encode(png_bytes).decode("ascii"),
         "mimeType": "image/png",
+    }
+
+
+def _detect_image_mime(data: bytes) -> str:
+    """Guess MIME type from the first few bytes. Sketchfab thumbnails are
+    usually JPEG; OCCT renders we produce are PNG."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"GIF8"):
+        return "image/gif"
+    if data.startswith(b"RIFF") and len(data) > 12 and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
+
+
+def _image_block_auto(data: bytes) -> dict:
+    return {
+        "type": "image",
+        "data": base64.b64encode(data).decode("ascii"),
+        "mimeType": _detect_image_mime(data),
     }
 
 
@@ -160,6 +195,38 @@ class CadToolset:
             parts.append((name, mtime, params_blob))
         return tuple(parts)
 
+    def _imports_dict_in_process(self) -> dict:
+        """Load every import in-process (STEP / IGES / BREP / STL). Mirrors
+        load_imports_from_manifest for use inside the running agent process."""
+        from ..cad._import_loader import load_to_workplane
+        out: dict = {}
+        for i in self.project.list_imports():
+            name = i["name"]
+            path = self.project.import_source_path(name)
+            if path is None:
+                continue
+            try:
+                out[name] = load_to_workplane(path)
+            except Exception:
+                continue
+        return out
+
+    def _imports_signature(self) -> tuple:
+        """Imports are immutable once added; mtime+size is enough to detect
+        the rare case of a user replacing the file out-of-band."""
+        parts = []
+        for i in self.project.list_imports():
+            name = i["name"]
+            path = self.project.import_source_path(name)
+            if path is None:
+                continue
+            try:
+                st = path.stat()
+                parts.append((name, st.st_mtime, st.st_size))
+            except OSError:
+                parts.append((name, 0.0, 0))
+        return tuple(parts)
+
     def load_object_in_process(self, name: str):
         """Run any object's script in this process and return its `model`."""
         script = self.project.object_source_path(name)
@@ -168,14 +235,20 @@ class CadToolset:
         st = script.stat().st_mtime
         params = self.project.read_object_params(name)
         sketch_sig = self._sketches_signature()
-        sig = (st, json.dumps(params, sort_keys=True), sketch_sig)
+        import_sig = self._imports_signature()
+        sig = (st, json.dumps(params, sort_keys=True), sketch_sig, import_sig)
         cached = self._model_cache.get(name)
         if cached and cached[0] == sig:
             return cached[1]
         sketches = self._sketches_dict_in_process()
+        imports = self._imports_dict_in_process()
         globs = runpy.run_path(
             str(script),
-            init_globals={"params": params, "sketches": sketches},
+            init_globals={
+                "params": params,
+                "sketches": sketches,
+                "imports": imports,
+            },
         )
         model = globs.get("model")
         if model is None:
@@ -305,7 +378,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             proj.object_params_path(name),
             cwd=proj.path,
             timeout=30.0,
-            sketches=_sketches_manifest(proj),
+            sketches=_sketches_manifest(proj), imports=_imports_manifest(proj),
         )
         toolset.render(result)
         if result.ok:
@@ -347,7 +420,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             view_dict,
             cwd=proj.path,
             width=900, height=700, timeout=30.0,
-            sketches=_sketches_manifest(proj),
+            sketches=_sketches_manifest(proj), imports=_imports_manifest(proj),
         )
         if not result.ok:
             msg = result.error or "snapshot failed"
@@ -643,7 +716,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             "view": view_dict,
             "width": 900, "height": 700,
         }
-        result = scene_script(spec, cwd=proj.path, sketches=_sketches_manifest(proj))
+        result = scene_script(spec, cwd=proj.path, sketches=_sketches_manifest(proj), imports=_imports_manifest(proj))
         if not result.ok:
             msg = result.error or "section render failed"
             if result.stderr:
@@ -686,7 +759,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             "view": view_dict,
             "width": 900, "height": 700,
         }
-        result = scene_script(spec, cwd=proj.path, sketches=_sketches_manifest(proj))
+        result = scene_script(spec, cwd=proj.path, sketches=_sketches_manifest(proj), imports=_imports_manifest(proj))
         if not result.ok:
             msg = result.error or "scene render failed"
             if result.stderr:
@@ -730,7 +803,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             "view": view_dict,
             "width": 900, "height": 700,
         }
-        result = scene_script(spec, cwd=proj.path, sketches=_sketches_manifest(proj))
+        result = scene_script(spec, cwd=proj.path, sketches=_sketches_manifest(proj), imports=_imports_manifest(proj))
         if not result.ok:
             msg = result.error or "boolean preview failed"
             if result.stderr:
@@ -785,6 +858,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
                     "cq": cq,
                     "params": proj.read_object_params(name),
                     "sketches": toolset._sketches_dict_in_process(),
+                    "imports": toolset._imports_dict_in_process(),
                 }
         except Exception as e:
             return _err(f"could not load active artifact: {e}")
@@ -825,7 +899,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             proj.object_params_path(safe),
             cwd=proj.path,
             timeout=30.0,
-            sketches=_sketches_manifest(proj),
+            sketches=_sketches_manifest(proj), imports=_imports_manifest(proj),
         )
         toolset.render(result)
         return _ok(
@@ -956,7 +1030,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             view_dict,
             cwd=proj.path,
             width=900, height=700, timeout=30.0,
-            sketches=_sketches_manifest(proj),
+            sketches=_sketches_manifest(proj), imports=_imports_manifest(proj),
         )
         try:
             viewer_path.unlink()
@@ -974,6 +1048,254 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
                 _image_block(result.png_bytes or b""),
             ]
         }
+
+    # ===== imports (read-only reference geometry) =====================
+
+    @tool(
+        "list_imports",
+        "List every reference STEP import in this project. Returns each import's name, file size, and visibility. Imports are read-only — the user supplied them as reference geometry. Use them in object scripts via the injected `imports` dict (e.g. `model = base.cut(imports['bracket'])`) to ensure your design fits / clears the reference.",
+        {},
+    )
+    async def list_imports(args):
+        proj = toolset.project
+        return _ok(json.dumps({
+            "imports": [
+                {
+                    "name": i["name"],
+                    "ext": i.get("ext"),
+                    "size_bytes": i.get("size_bytes"),
+                    "visible": i.get("visible", True),
+                }
+                for i in proj.list_imports()
+            ],
+        }, indent=2))
+
+    @tool(
+        "import_inspect",
+        "Measure a STEP import: bounding box (min, max, size, diagonal), volume, surface area, and entity counts. Use this when the user wants the new design to fit / clear a reference part — measure the import first, then size your model accordingly.",
+        {"name": str},
+    )
+    async def import_inspect(args):
+        proj = toolset.project
+        name = (args.get("name") or "").strip()
+        if not name:
+            return _err("'name' is required (use list_imports to see what's available)")
+        if not proj.import_exists(name):
+            return _err(
+                f"import {name!r} does not exist (have: "
+                f"{[i['name'] for i in proj.list_imports()]})"
+            )
+        try:
+            from ..cad._import_loader import load_to_workplane
+            wp = load_to_workplane(proj.import_source_path(name))
+        except Exception as e:
+            return _err(f"could not load import {name!r}: {e}")
+        shape = wp.val() if hasattr(wp, "val") and callable(wp.val) else wp
+        bb = shape.BoundingBox()
+        info: dict[str, Any] = {
+            "name": name,
+            "bbox": {
+                "min": [bb.xmin, bb.ymin, bb.zmin],
+                "max": [bb.xmax, bb.ymax, bb.zmax],
+                "size": [bb.xlen, bb.ylen, bb.zlen],
+                "diagonal": bb.DiagonalLength,
+            },
+            "face_count": len(shape.Faces()),
+            "edge_count": len(shape.Edges()),
+            "vertex_count": len(shape.Vertices()),
+        }
+        try:
+            info["volume_mm3"] = shape.Volume()
+        except Exception:
+            info["volume_mm3"] = None
+        try:
+            info["area_mm2"] = shape.Area()
+        except Exception:
+            info["area_mm2"] = None
+        return _ok(json.dumps(info, indent=2))
+
+    # ===== sketchfab (optional, gated by user settings) ===============
+    #
+    # Tools for searching the public Sketchfab catalogue, looking at
+    # thumbnails, and downloading STEP files into the project's imports
+    # directory. The tools are only registered (further down) when the
+    # user has enabled the integration AND supplied a token.
+
+    @tool(
+        "sketchfab_search",
+        "Search the public Sketchfab catalogue for reference models. Returns up to 10 hits with thumbnail images you can SEE, plus uid/name/license/downloadable/views. Use this when the user asks for a real-world part (a connector, screw, motor, bearing, etc.) and you want a reference geometry to model around. Pair with sketchfab_download once you've picked the right hit. Set `downloadable_only=true` to filter to just downloadable models.",
+        {"query": str, "count": int, "downloadable_only": bool},
+    )
+    async def sketchfab_search(args):
+        from ..cad import sketchfab
+        s = user_settings.load()
+        query = (args.get("query") or "").strip()
+        if not query:
+            return _err("'query' is required")
+        count = int(args.get("count") or 10)
+        downloadable_only = bool(args.get("downloadable_only", False))
+        try:
+            hits = sketchfab.search(
+                query, count=count,
+                token=(s.sketchfab_token or None),
+                downloadable_only=downloadable_only,
+            )
+        except Exception as e:
+            return _err(f"sketchfab search failed: {e}")
+        if not hits:
+            return _ok(f"no results for {query!r}.")
+
+        # Build a multimodal content list: a one-line summary plus each
+        # hit's thumbnail with a small caption above it. Captions cite the
+        # uid the agent should pass to sketchfab_view / sketchfab_download.
+        content: list[dict] = [{
+            "type": "text",
+            "text": f"sketchfab search for {query!r} — {len(hits)} result(s):",
+        }]
+        for i, h in enumerate(hits, 1):
+            caption = (
+                f"#{i}  uid={h.uid}  views={h.view_count}  likes={h.like_count}  "
+                f"license={h.license_label}  "
+                f"downloadable={'yes' if h.is_downloadable else 'no'}\n"
+                f"name: {h.name}\n"
+                f"author: {h.user}"
+            )
+            if h.description:
+                caption += f"\ndescription: {h.description[:200]}"
+            content.append({"type": "text", "text": caption})
+            if h.thumbnail_url:
+                try:
+                    img_bytes = sketchfab.fetch_image_bytes(h.thumbnail_url)
+                    content.append(_image_block_auto(img_bytes))
+                except Exception:
+                    # A failing thumbnail shouldn't kill the whole search.
+                    pass
+        return {"content": content}
+
+    @tool(
+        "sketchfab_view",
+        "Look up a single Sketchfab model by uid and return its detailed metadata + a larger preview image. Use this AFTER sketchfab_search when you've narrowed in on a candidate but want to see it more clearly before downloading. Returns dimensions / face count are not available — Sketchfab only ships preview metadata, not the geometry; for that, sketchfab_download then import_inspect.",
+        {"uid": str},
+    )
+    async def sketchfab_view(args):
+        from ..cad import sketchfab
+        s = user_settings.load()
+        uid = (args.get("uid") or "").strip()
+        if not uid:
+            return _err("'uid' is required")
+        try:
+            data = sketchfab.get_model(uid, token=(s.sketchfab_token or None))
+        except Exception as e:
+            return _err(f"sketchfab get_model failed: {e}")
+        hit = sketchfab._hit_from_result(data)
+        # Pull a larger preview if Sketchfab gives us one.
+        thumb = sketchfab._pick_thumbnail(data.get("thumbnails"), target_w=1024)
+        content: list[dict] = [{
+            "type": "text",
+            "text": (
+                f"sketchfab model {hit.uid}\n"
+                f"name: {hit.name}\n"
+                f"author: {hit.user}\n"
+                f"license: {hit.license_label}\n"
+                f"views: {hit.view_count}, likes: {hit.like_count}\n"
+                f"downloadable: {'yes' if hit.is_downloadable else 'no'}\n"
+                f"viewer: {hit.viewer_url}\n"
+                f"description: {hit.description}"
+            ),
+        }]
+        if thumb:
+            try:
+                img = sketchfab.fetch_image_bytes(thumb)
+                content.append(_image_block_auto(img))
+            except Exception:
+                pass
+        return {"content": content}
+
+    @tool(
+        "sketchfab_download",
+        "Download a Sketchfab model into the project's imports/ folder so it becomes a real reference body the agent can measure or (for B-rep formats) boolean against. Picks the best available format in this order: STEP > IGES > BREP > STL > GLB > glTF. STEP/IGES/BREP imports support full booleans and accurate measurements; STL/GLB/glTF imports are mesh-only — display + bbox work but boolean ops on them are unreliable. Sketchfab models are USUALLY in GLB (they come from Blender / artists) so glb is the most common path. Pass `name` to override the import filename (defaults to a sanitized version of the Sketchfab name).",
+        {"uid": str, "name": str},
+    )
+    async def sketchfab_download(args):
+        from ..cad import sketchfab
+        proj = toolset.project
+        s = user_settings.load()
+        token = (s.sketchfab_token or "").strip()
+        if not token:
+            return _err("Sketchfab integration is enabled but no API token is set in Settings")
+        uid = (args.get("uid") or "").strip()
+        if not uid:
+            return _err("'uid' is required (use sketchfab_search first if you don't have one)")
+
+        try:
+            formats = sketchfab.list_download_formats(uid, token=token)
+        except PermissionError as e:
+            return _err(str(e))
+        except Exception as e:
+            return _err(f"sketchfab download URLs failed: {e}")
+
+        step = sketchfab.find_importable_format(formats)
+        if step is None:
+            available = ", ".join(f"{f.name}({f.extension})" for f in formats) or "none"
+            return _err(
+                f"model {uid} has no importable file "
+                f"(available: {available}). We support .step/.stp/.iges/.igs/"
+                ".brep/.brp/.stl/.glb/.gltf — anything else (FBX, ZIP-wrapped "
+                "glTF, USDZ, etc.) we can't currently ingest."
+            )
+
+        # Decide the import filename. Defaults to the Sketchfab model name.
+        name_arg = (args.get("name") or "").strip()
+        if not name_arg:
+            try:
+                meta = sketchfab.get_model(uid, token=token)
+                name_arg = meta.get("name") or f"sketchfab-{uid}"
+            except Exception:
+                name_arg = f"sketchfab-{uid}"
+        safe = sketchfab.safe_filename_from_name(name_arg)
+        # Avoid clobbering an existing import.
+        if proj.import_exists(safe):
+            safe = f"{safe}-{uid[:6]}"
+
+        proj._ensure_imports_dir()
+        dest = proj.imports_dir / f"{safe}{step.extension}"
+        try:
+            sketchfab.download_to_path(step.url, dest, token=token)
+        except Exception as e:
+            if dest.exists():
+                try:
+                    dest.unlink()
+                except OSError:
+                    pass
+            return _err(f"sketchfab download failed: {e}")
+
+        # Tell the API layer to tessellate + push to the viewer; but we don't
+        # have a direct handle, so emit the same way other tools do.
+        try:
+            from ..cad.script_runner import tessellate_import as tessellate_import_script
+            r = tessellate_import_script(dest, cwd=proj.path, timeout=60.0)
+            bus.emit("doc_import_geometry", {
+                "doc_id": proj.id, "import": safe,
+                "ok": r.ok, "error": r.error, "stderr": r.stderr,
+                "meta": r.meta, "glb_b64": r.glb_b64, "topology": r.topology,
+            })
+        except Exception:
+            # Non-fatal — the file is on disk, viewer will pick it up next refresh.
+            pass
+
+        # Object scripts may consume this import; re-render visible ones.
+        for o in proj.list_objects():
+            if o.get("visible", True):
+                # Imports list changed under us — update geometry.
+                pass  # handled by emit_object_geometry caller chain in api.py
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+
+        return _ok(
+            f"downloaded sketchfab model {uid!r} as import {safe!r} "
+            f"({step.extension}, {step.size_bytes} bytes). "
+            f"Object scripts can now reference it as imports[{safe!r}]; "
+            f"call import_inspect or use it in booleans."
+        )
 
     # ===== git / timeline =============================================
 
@@ -998,7 +1320,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
         sha = toolset.project.commit(args["subject"], args.get("body", ""))
         return _ok(f"committed {sha[:8]} — {args['subject']}")
 
-    return [
+    base_tools: list[Any] = [
         run_model, snapshot, measure, set_parameter, list_parameters,
         query_faces, query_edges, query_vertices,
         check_validity, mass_properties, distance_between,
@@ -1006,13 +1328,37 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
         eval_expression,
         list_objects, create_object, set_active_object,
         list_sketches, create_sketch, set_active_sketch, snapshot_sketch,
+        list_imports, import_inspect,
         git_log, commit_turn,
     ]
+    # Sketchfab tools are gated behind the user opt-in; we only register
+    # them when the user has both flipped the flag AND supplied a token,
+    # so the agent can't accidentally call a network tool when it isn't
+    # configured.
+    s = user_settings.load()
+    if s.sketchfab_enabled and s.sketchfab_token:
+        base_tools.extend([sketchfab_search, sketchfab_view, sketchfab_download])
+    return base_tools
 
 
-# Built-in SDK tools we expose alongside the CAD tools. Bash is intentionally
-# omitted; the agent shouldn't be running shell commands on the user's box.
-BUILTIN_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep"]
+# Built-in SDK tools we expose alongside the CAD tools.
+#
+# Bash is intentionally omitted: the agent shouldn't be running shell
+# commands on the user's box, and CADQuery work doesn't need it.
+# NotebookEdit, ExitPlanMode, etc. are also omitted as not useful here.
+#
+# WebSearch + WebFetch are essential for real CAD work — the agent
+# constantly needs to look up datasheet dimensions, standard part sizes,
+# tolerance specs, etc. Without them it tends to hallucinate dimensions.
+# TodoWrite lets the agent track multi-step work (modeled in the chat
+# panel as a live task list). AskUserQuestion lets it pause and clarify
+# rather than guessing.
+BUILTIN_TOOLS = [
+    "Read", "Write", "Edit", "Glob", "Grep",
+    "WebSearch", "WebFetch",
+    "TodoWrite",
+    "AskUserQuestion",
+]
 
 CAD_TOOL_NAMES = [
     "mcp__cad__run_model",
@@ -1037,6 +1383,14 @@ CAD_TOOL_NAMES = [
     "mcp__cad__create_sketch",
     "mcp__cad__set_active_sketch",
     "mcp__cad__snapshot_sketch",
+    "mcp__cad__list_imports",
+    "mcp__cad__import_inspect",
+    # Sketchfab tools — only actually registered when the user has opted in,
+    # but listed unconditionally so the SDK's allowlist doesn't block them
+    # when registration does happen.
+    "mcp__cad__sketchfab_search",
+    "mcp__cad__sketchfab_view",
+    "mcp__cad__sketchfab_download",
     "mcp__cad__git_log",
     "mcp__cad__commit_turn",
 ]

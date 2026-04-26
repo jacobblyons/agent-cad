@@ -64,6 +64,10 @@ const OBJECT_PALETTE = [
   "#8cdb9b",  // green
 ];
 
+// Imports use a single desaturated slate so they read visually as
+// reference / ghost geometry — distinct from authored objects.
+const IMPORT_COLOR = "#6b8a96";
+
 function colorForIndex(i: number): string {
   return OBJECT_PALETTE[((i % OBJECT_PALETTE.length) + OBJECT_PALETTE.length) % OBJECT_PALETTE.length];
 }
@@ -636,7 +640,7 @@ function fmtArr(v: [number, number, number]): string {
 export function ViewerPane() {
   const { doc } = useDoc();
   const { send, addAttachment } = useChat();
-  const { visible, visibleSketches, activeName, errorMsg } = useViewer();
+  const { visible, visibleSketches, visibleImports, activeName, errorMsg } = useViewer();
   const activeSketch = doc?.active_sketch ?? null;
   const wrapperRef = useRef<HTMLDivElement>(null);
   const cameraRef = useRef<CameraSnap | null>(null);
@@ -849,6 +853,30 @@ export function ViewerPane() {
             onCancel={() => setPending(null)}
           />
         )}
+
+        {/* Imports render through the same FacesGroup pipeline as objects but
+            outside the picking group — they're reference-only, never the
+            target of a pin or hover. */}
+        {visibleImports.map((v) => (
+          <group key={`import-${v.name}`}>
+            <FacesGroup
+              glbB64={v.geometry.glbB64}
+              viewMode={viewMode}
+              bodyColor={IMPORT_COLOR}
+              active={false}
+              hoveredFace={null}
+              pinnedFace={null}
+            />
+            <EdgesGroup
+              topology={v.geometry.topology}
+              viewMode={viewMode}
+              wireColor={IMPORT_COLOR}
+              active={false}
+              hoveredEdge={null}
+              pinnedEdge={null}
+            />
+          </group>
+        ))}
 
         <SketchOverlay sketches={visibleSketches} activeSketch={activeSketch} />
 

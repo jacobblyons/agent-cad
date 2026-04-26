@@ -7,6 +7,7 @@ Argv:
     4 = output json path  (always written; ok=True/False)
     5 = tessellation deflection (float)
     6 = sketches manifest path (optional; '-' = none)
+    7 = imports manifest path  (optional; '-' = none)
 
 Sketches manifest format (JSON):
     [
@@ -14,12 +15,18 @@ Sketches manifest format (JSON):
                        "params": "/abs/path/sketches/base.params.json"},
       ...
     ]
+Imports manifest format (JSON):
+    [
+      {"name": "bracket", "path": "/abs/path/imports/bracket.step"},
+      ...
+    ]
 Each sketch script is run before the object's script. Each must define
 top-level `sketch` (a cq.Sketch) and may define `plane` (a string like
 "XY", a (str, float) offset tuple, or a full cq.Plane). The runtime
 builds `cq.Workplane(plane).placeSketch(sketch)` and accumulates these
 into a `sketches` dict that's injected into the object script alongside
-its own `params`.
+its own `params`. STEP imports are loaded and injected as an `imports`
+dict (name → cq.Workplane) so object scripts can boolean against them.
 """
 from __future__ import annotations
 
@@ -64,6 +71,9 @@ def main() -> int:
     sketches_manifest = (
         Path(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6] != "-" else None
     )
+    imports_manifest = (
+        Path(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7] != "-" else None
+    )
 
     result: dict = {"ok": False, "error": None, "meta": None}
     try:
@@ -83,10 +93,16 @@ def main() -> int:
 
         from app.cad._sketch_loader import load_sketches_from_manifest
         sketches = load_sketches_from_manifest(sketches_manifest)
+        from app.cad._import_loader import load_imports_from_manifest
+        imports = load_imports_from_manifest(imports_manifest)
 
         globs = runpy.run_path(
             str(script_path),
-            init_globals={"params": params, "sketches": sketches},
+            init_globals={
+                "params": params,
+                "sketches": sketches,
+                "imports": imports,
+            },
         )
 
         model = globs.get("model")

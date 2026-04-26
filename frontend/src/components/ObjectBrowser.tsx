@@ -1,5 +1,16 @@
 import { useState } from "react";
-import { Box, Eye, EyeOff, ListChecks, Plus, Trash2, Pencil, Check, X } from "lucide-react";
+import {
+  Box,
+  Download,
+  Eye,
+  EyeOff,
+  ListChecks,
+  Plus,
+  Trash2,
+  Pencil,
+  Check,
+  X,
+} from "lucide-react";
 import { call } from "@/lib/pywebview";
 import { useDoc } from "@/lib/doc";
 import { useChat } from "@/lib/chat";
@@ -110,6 +121,17 @@ function ObjectRow({
     if (disabled) return;
     await call("object_set_visible", docId, name, !visible);
   };
+  const exportObj = async () => {
+    if (disabled) return;
+    const r = await call<{ ok: boolean; error?: string; cancelled?: boolean }>(
+      "project_export_object",
+      docId,
+      name,
+    );
+    if (!r?.ok && !r?.cancelled) {
+      window.alert(`Export failed: ${r?.error ?? "unknown error"}`);
+    }
+  };
   const del = async () => {
     if (!canDelete || disabled) return;
     if (!window.confirm(`Delete object "${name}"? This can be undone via the timeline.`)) return;
@@ -171,6 +193,17 @@ function ObjectRow({
         {requirementCount > 0 && (
           <span className="text-[10px] tabular-nums">{requirementCount}</span>
         )}
+      </button>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          exportObj();
+        }}
+        disabled={disabled}
+        title="Export this object as STL / STEP / BREP"
+        className="rounded p-0.5 opacity-0 transition group-hover:opacity-60 hover:bg-[var(--color-hover)] hover:!opacity-100 disabled:opacity-0"
+      >
+        <Download size={10} />
       </button>
       <button
         onClick={(e) => {

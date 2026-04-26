@@ -7,9 +7,9 @@
  * so individual panels don't need to know about tabs at all.
  */
 import { createContext, useContext } from "react";
-import type { ChatImage, Turn } from "./chat";
+import type { AgentTodo, ChatImage, Turn } from "./chat";
 import type { DocSummary } from "./doc";
-import type { ObjectGeometry, SketchGeometry } from "./viewer";
+import type { ImportGeometry, ObjectGeometry, SketchGeometry } from "./viewer";
 
 export type TabState = {
   doc: DocSummary;
@@ -19,9 +19,14 @@ export type TabState = {
   geometry: Record<string, ObjectGeometry>;
   // Per-sketch tessellation, keyed by sketch name (same persistence rule).
   sketchGeometry: Record<string, SketchGeometry>;
+  // Per-import tessellation, keyed by import name (same persistence rule).
+  importGeometry: Record<string, ImportGeometry>;
   // Attachments queued for the next chat send (sketches, viewer snapshots).
   // Cleared after a successful send.
   pendingAttachments: ChatImage[];
+  // Latest TodoWrite snapshot from the agent. Empty until the agent first
+  // publishes a list, then replaced wholesale on each TodoWrite call.
+  todos: AgentTodo[];
 };
 
 export type TabsCtx = {

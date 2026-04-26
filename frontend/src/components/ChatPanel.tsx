@@ -1,9 +1,25 @@
-import { useEffect, useRef, useState } from "react";
-import { Loader2, Pencil, Send, Wrench, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Check,
+  Circle,
+  CircleHelp,
+  Globe,
+  ListChecks,
+  Loader2,
+  Pencil,
+  Send,
+  ShieldCheck,
+  ShieldX,
+  Wrench,
+  X,
+} from "lucide-react";
 import { DrawingDialog } from "./DrawingDialog";
+import { call } from "@/lib/pywebview";
 import {
   useChat,
+  type AgentTodo,
   type ChatBlock,
+  type ChatPermissionBlock,
   type ChatToolBlock,
   type Turn,
 } from "@/lib/chat";
@@ -29,8 +45,15 @@ const TEXTAREA_MAX_PX = 240;
 
 export function ChatPanel() {
   const { doc } = useDoc();
-  const { turns, isAgentRunning, send, pendingAttachments, addAttachment, removeAttachment } =
-    useChat();
+  const {
+    turns,
+    isAgentRunning,
+    send,
+    pendingAttachments,
+    addAttachment,
+    removeAttachment,
+    todos,
+  } = useChat();
   const [input, setInput] = useState("");
   const [showDraw, setShowDraw] = useState(false);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -64,6 +87,7 @@ export function ChatPanel() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      <TasksPanel todos={todos} />
       <div ref={scrollerRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
         {turns.length === 0 && (
           <div className="rounded-md bg-[var(--color-panel-2)] px-3 py-2 text-sm text-[var(--color-muted)]">
@@ -175,18 +199,22 @@ function AssistantTurn({
 }) {
   return (
     <div className="space-y-2">
-      {turn.blocks.map((b: ChatBlock, i: number) =>
-        b.kind === "text" ? (
-          <div
-            key={i}
-            className="max-w-[95%] whitespace-pre-wrap rounded-md bg-[var(--color-panel-2)] px-3 py-2 text-sm leading-relaxed"
-          >
-            {b.text}
-          </div>
-        ) : (
-          <ToolCard key={i} block={b} />
-        ),
-      )}
+      {turn.blocks.map((b: ChatBlock, i: number) => {
+        if (b.kind === "text") {
+          return (
+            <div
+              key={i}
+              className="max-w-[95%] whitespace-pre-wrap rounded-md bg-[var(--color-panel-2)] px-3 py-2 text-sm leading-relaxed"
+            >
+              {b.text}
+            </div>
+          );
+        }
+        if (b.kind === "permission") {
+          return <PermissionCard key={i} block={b} />;
+        }
+        return <ToolCard key={i} block={b} />;
+      })}
       {turn.errorText && (
         <div className="max-w-[95%] rounded-md border border-[#f48771] bg-[#3a1d1d] px-3 py-2 text-xs text-[#f48771]">
           {turn.errorText}
@@ -196,7 +224,97 @@ function AssistantTurn({
   );
 }
 
+function PermissionCard({ block }: { block: ChatPermissionBlock }) {
+  const [busy, setBusy] = useState(false);
+
+  const respond = async (approved: boolean) => {
+    if (busy || block.status !== "pending") return;
+    setBusy(true);
+    try {
+      await call("permission_resolve", block.requestId, approved, "");
+    } finally {
+      // We don't optimistically flip state — the backend's
+      // permission_resolved event closes the loop and updates the block.
+      setBusy(false);
+    }
+  };
+
+  const isPlaywright = block.tool.startsWith("mcp__playwright__");
+  const Icon = isPlaywright ? Globe : ShieldCheck;
+  const friendlyTool = block.tool
+    .replace(/^mcp__playwright__/, "playwright.")
+    .replace(/^mcp__([^_]+)__/, "$1.")
+    .replace(/^mcp__/, "");
+
+  return (
+    <div
+      className={cn(
+        "w-full max-w-[95%] overflow-hidden rounded-md border px-3 py-2.5 text-sm",
+        block.status === "pending"
+          ? "border-[var(--color-focus)] bg-[var(--color-panel-2)]"
+          : block.status === "approved"
+            ? "border-[var(--color-border)] bg-[var(--color-panel-2)] text-[var(--color-muted)]"
+            : "border-[#f48771]/60 bg-[var(--color-panel-2)] text-[var(--color-muted)]",
+      )}
+    >
+      <div className="flex items-start gap-2">
+        <Icon
+          size={14}
+          className={cn(
+            "mt-0.5 shrink-0",
+            block.status === "pending"
+              ? "text-[var(--color-focus)]"
+              : block.status === "approved"
+                ? "text-[var(--color-accent)]"
+                : "text-[#f48771]",
+          )}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="text-[10px] uppercase tracking-wider text-[var(--color-muted)]">
+            {block.status === "pending"
+              ? "Permission requested"
+              : block.status === "approved"
+                ? "Approved"
+                : block.status === "timeout"
+                  ? "Timed out"
+                  : "Denied"}
+          </div>
+          <div className="font-mono text-xs text-[var(--color-text)]">
+            {friendlyTool}({fmtToolInput(block.input)})
+          </div>
+          {block.status === "pending" && (
+            <div className="mt-2 flex items-center gap-2">
+              <button
+                onClick={() => respond(true)}
+                disabled={busy}
+                className="flex h-7 items-center gap-1 rounded-sm bg-[var(--color-accent)] px-2 text-xs text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-40"
+              >
+                <ShieldCheck size={11} />
+                <span>Approve</span>
+              </button>
+              <button
+                onClick={() => respond(false)}
+                disabled={busy}
+                className="flex h-7 items-center gap-1 rounded-sm border border-[var(--color-border)] px-2 text-xs text-[var(--color-text)] hover:bg-[var(--color-hover)] disabled:opacity-40"
+              >
+                <ShieldX size={11} />
+                <span>Deny</span>
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ToolCard({ block }: { block: ChatToolBlock }) {
+  // AskUserQuestion is rendered specially: the agent is pausing to ask
+  // the user something, so we want it to look like a question prompt
+  // rather than a routine tool call.
+  if (block.tool === "AskUserQuestion") {
+    return <AskUserQuestionCard block={block} />;
+  }
   return (
     <div
       className={cn(
@@ -230,5 +348,133 @@ function ToolCard({ block }: { block: ChatToolBlock }) {
         </div>
       )}
     </div>
+  );
+}
+
+function AskUserQuestionCard({ block }: { block: ChatToolBlock }) {
+  // The exact input shape varies between SDK versions; pull common fields
+  // best-effort. Typically: { question: string, options?: string[] } or
+  // { questions: [{ question, options }] }.
+  const input = (block.input ?? {}) as Record<string, unknown>;
+  const single = typeof input.question === "string" ? input.question : null;
+  const list = Array.isArray(input.questions)
+    ? (input.questions as Array<Record<string, unknown>>)
+    : null;
+  const options = Array.isArray(input.options)
+    ? (input.options as unknown[]).map((o) => String(o))
+    : null;
+  return (
+    <div className="w-full max-w-[95%] overflow-hidden rounded-md border border-[var(--color-focus)] bg-[var(--color-panel-2)] px-3 py-2.5 text-sm">
+      <div className="flex items-start gap-2 text-[var(--color-text)]">
+        <CircleHelp
+          size={14}
+          className="mt-0.5 shrink-0 text-[var(--color-focus)]"
+        />
+        <div className="min-w-0 flex-1 space-y-1.5">
+          {single && <div className="leading-relaxed">{single}</div>}
+          {list?.map((q, i) => {
+            const text = typeof q.question === "string" ? q.question : "";
+            const qOptions = Array.isArray(q.options)
+              ? (q.options as unknown[]).map((o) => String(o))
+              : null;
+            return (
+              <div key={i}>
+                <div className="leading-relaxed">{text}</div>
+                {qOptions && qOptions.length > 0 && (
+                  <ul className="mt-1 list-disc pl-5 text-xs text-[var(--color-muted)]">
+                    {qOptions.map((opt, j) => (
+                      <li key={j}>{opt}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            );
+          })}
+          {options && options.length > 0 && (
+            <ul className="mt-1 list-disc pl-5 text-xs text-[var(--color-muted)]">
+              {options.map((opt, i) => (
+                <li key={i}>{opt}</li>
+              ))}
+            </ul>
+          )}
+          <div className="text-[10px] uppercase tracking-wider text-[var(--color-muted)]">
+            type your reply below
+          </div>
+        </div>
+      </div>
+      {block.resultText && (
+        <div className="mt-2 whitespace-pre-wrap pl-6 text-xs text-[var(--color-muted)]">
+          {block.resultText}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TasksPanel({ todos }: { todos: AgentTodo[] }) {
+  // Only render when there's at least one item that isn't fully done — once
+  // every todo is "completed" the panel collapses so it doesn't take up
+  // space across follow-up turns.
+  const hasOpen = useMemo(
+    () => todos.some((t) => t.status !== "completed"),
+    [todos],
+  );
+  if (todos.length === 0 || !hasOpen) return null;
+
+  const total = todos.length;
+  const done = todos.filter((t) => t.status === "completed").length;
+
+  return (
+    <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-panel-2)] px-3 py-2 text-xs">
+      <div className="mb-1 flex items-center gap-1.5 text-[var(--color-muted)]">
+        <ListChecks size={12} />
+        <span className="text-[10px] uppercase tracking-wider">tasks</span>
+        <span className="ml-auto tabular-nums">
+          {done} / {total}
+        </span>
+      </div>
+      <ul className="space-y-1">
+        {todos.map((todo, i) => (
+          <li key={i} className="flex items-start gap-2 leading-snug">
+            <TodoIcon status={todo.status} />
+            <span
+              className={cn(
+                "min-w-0 flex-1 break-words",
+                todo.status === "completed" &&
+                  "text-[var(--color-muted)] line-through",
+                todo.status === "in_progress" && "text-[var(--color-text)]",
+                todo.status === "pending" && "text-[var(--color-muted)]",
+              )}
+            >
+              {todo.status === "in_progress" && todo.activeForm
+                ? todo.activeForm
+                : todo.content}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function TodoIcon({ status }: { status: AgentTodo["status"] }) {
+  if (status === "completed") {
+    return (
+      <Check
+        size={11}
+        className="mt-0.5 shrink-0 text-[var(--color-accent)]"
+      />
+    );
+  }
+  if (status === "in_progress") {
+    return (
+      <Loader2
+        size={11}
+        className="mt-0.5 shrink-0 animate-spin text-[var(--color-focus)]"
+      />
+    );
+  }
+  return (
+    <Circle size={11} className="mt-0.5 shrink-0 text-[var(--color-muted)]" />
   );
 }

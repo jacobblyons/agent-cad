@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { TweaksPanel } from "./TweaksPanel";
 import { ObjectBrowser } from "./ObjectBrowser";
 import { SketchBrowser } from "./SketchBrowser";
+import { ImportBrowser } from "./ImportBrowser";
 
 const STORAGE_KEY = "agent-cad:right-sidebar:objects-h";
 const DEFAULT_PX = 220;
@@ -69,8 +70,11 @@ export function RightSidebar() {
         <div className="min-h-0 flex-1 border-b border-[var(--color-border)]">
           <ObjectBrowser />
         </div>
-        <div className="min-h-0 flex-1">
+        <div className="min-h-0 flex-1 border-b border-[var(--color-border)]">
           <SketchBrowser />
+        </div>
+        <div className="min-h-0 flex-1">
+          <ImportBrowser />
         </div>
       </div>
     </div>
