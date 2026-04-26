@@ -35,8 +35,13 @@ import traceback
 from pathlib import Path
 
 
-def _load_item(item: dict) -> dict:
-    """Run the script and pull out `model`. Returns {name, model}."""
+def _load_item(item: dict, sketches: dict) -> dict:
+    """Run the script and pull out `model`. Returns {name, model}.
+
+    `sketches` is the per-project sketches dict (built once and reused for
+    every item) so all object scripts in the scene see the same sketches
+    that the live viewer sees.
+    """
     script = Path(item["script"])
     params_path = Path(item["params"])
     if not script.exists():
@@ -47,7 +52,10 @@ def _load_item(item: dict) -> dict:
             params = json.loads(params_path.read_text(encoding="utf-8") or "{}")
         except json.JSONDecodeError as e:
             raise RuntimeError(f"params file is invalid: {e}") from e
-    globs = runpy.run_path(str(script), init_globals={"params": params})
+    globs = runpy.run_path(
+        str(script),
+        init_globals={"params": params, "sketches": sketches},
+    )
     model = globs.get("model")
     if model is None:
         raise RuntimeError(f"{script.name} finished without defining `model`")
@@ -120,7 +128,15 @@ def main() -> int:
         except OSError:
             pass
 
-        loaded = [_load_item(item) for item in spec.get("items", [])]
+        # Sketches are project-wide; build the dict once and let every loaded
+        # item see the same set the live viewer sees.
+        from app.cad._sketch_loader import load_sketches_from_manifest
+        sketches_manifest = spec.get("sketches_manifest")
+        sketches = load_sketches_from_manifest(
+            Path(sketches_manifest) if sketches_manifest else None
+        )
+
+        loaded = [_load_item(item, sketches) for item in spec.get("items", [])]
         if not loaded:
             result["error"] = "scene spec has no items"
             json_out.write_text(json.dumps(result), encoding="utf-8")

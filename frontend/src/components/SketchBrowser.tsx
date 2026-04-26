@@ -1,32 +1,50 @@
 import { useState } from "react";
-import { Box, Eye, EyeOff, ListChecks, Plus, Trash2, Pencil, Check, X } from "lucide-react";
+import {
+  Check,
+  Eye,
+  EyeOff,
+  Pencil,
+  PenLine,
+  Plus,
+  Trash2,
+  X,
+} from "lucide-react";
 import { call } from "@/lib/pywebview";
 import { useDoc } from "@/lib/doc";
 import { useChat } from "@/lib/chat";
 import { cn } from "@/lib/utils";
-import { RequirementsDialog } from "./RequirementsDialog";
 
-export function ObjectBrowser() {
+/**
+ * Mirror of ObjectBrowser for sketches. Sketches don't have requirements
+ * (yet); the row is otherwise the same: visibility toggle, click to set
+ * active, rename, delete.
+ *
+ * Visual cue that distinguishes sketches from objects: the PenLine icon
+ * and a tinted "active" highlight that signals "active edit target is a
+ * sketch right now" so the user knows their next prompt will edit a 2D
+ * profile, not a 3D model.
+ */
+export function SketchBrowser() {
   const { doc } = useDoc();
   const { isAgentRunning } = useChat();
   const [creating, setCreating] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [reqsFor, setReqsFor] = useState<string | null>(null);
 
   if (!doc) return null;
-  const objects = doc.objects ?? [];
-  const reqsObject = reqsFor ? objects.find((o) => o.name === reqsFor) ?? null : null;
+  const sketches = doc.sketches ?? [];
+  const activeKind = doc.active_kind;
+  const activeSketch = doc.active_sketch ?? null;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-2">
         <span className="text-xs uppercase tracking-wider text-[var(--color-muted)]">
-          Objects
+          Sketches
         </span>
         <button
           onClick={() => setCreating(true)}
           disabled={isAgentRunning}
-          title="New object"
+          title="New sketch"
           className="flex h-5 w-5 items-center justify-center rounded-sm text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-text)] disabled:opacity-40"
         >
           <Plus size={12} />
@@ -34,86 +52,78 @@ export function ObjectBrowser() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+        {sketches.length === 0 && !creating && (
+          <div className="px-2 py-2 text-[11px] leading-relaxed text-[var(--color-muted)]">
+            No sketches yet. Sketches are 2D profiles other parts can extrude
+            from. Ask the agent or click + to start one.
+          </div>
+        )}
         <div className="space-y-0.5">
-          {objects.map((o) =>
-            renaming === o.name ? (
+          {sketches.map((s) =>
+            renaming === s.name ? (
               <RenameRow
-                key={o.name}
+                key={s.name}
                 docId={doc.id}
-                oldName={o.name}
+                oldName={s.name}
                 onDone={() => setRenaming(null)}
               />
             ) : (
-              <ObjectRow
-                key={o.name}
+              <SketchRow
+                key={s.name}
                 docId={doc.id}
-                name={o.name}
-                active={
-                  doc.active_kind === "object" && o.name === doc.active_object
-                }
-                visible={o.visible}
-                requirementCount={(o.requirements ?? []).length}
-                canDelete={objects.length > 1}
+                name={s.name}
+                active={activeKind === "sketch" && activeSketch === s.name}
+                visible={s.visible}
                 disabled={isAgentRunning}
-                onRename={() => setRenaming(o.name)}
-                onOpenRequirements={() => setReqsFor(o.name)}
+                onRename={() => setRenaming(s.name)}
               />
             ),
           )}
           {creating && (
             <CreateRow
               docId={doc.id}
-              existing={objects.map((o) => o.name)}
+              existing={sketches.map((s) => s.name)}
               onDone={() => setCreating(false)}
             />
           )}
         </div>
       </div>
-
-      <RequirementsDialog
-        open={reqsObject !== null}
-        onClose={() => setReqsFor(null)}
-        docId={doc.id}
-        objectName={reqsObject?.name ?? ""}
-        initial={reqsObject?.requirements ?? []}
-      />
     </div>
   );
 }
 
-function ObjectRow({
+function SketchRow({
   docId,
   name,
   active,
   visible,
-  requirementCount,
-  canDelete,
   disabled,
   onRename,
-  onOpenRequirements,
 }: {
   docId: string;
   name: string;
   active: boolean;
   visible: boolean;
-  requirementCount: number;
-  canDelete: boolean;
   disabled: boolean;
   onRename: () => void;
-  onOpenRequirements: () => void;
 }) {
   const setActive = async () => {
     if (active || disabled) return;
-    await call("object_set_active", docId, name);
+    await call("sketch_set_active", docId, name);
   };
   const toggleVisible = async () => {
     if (disabled) return;
-    await call("object_set_visible", docId, name, !visible);
+    await call("sketch_set_visible", docId, name, !visible);
   };
   const del = async () => {
-    if (!canDelete || disabled) return;
-    if (!window.confirm(`Delete object "${name}"? This can be undone via the timeline.`)) return;
-    await call("object_delete", docId, name);
+    if (disabled) return;
+    if (
+      !window.confirm(
+        `Delete sketch "${name}"? Object scripts that consume it will break until updated.`,
+      )
+    )
+      return;
+    await call("sketch_delete", docId, name);
   };
   const VisIcon = visible ? Eye : EyeOff;
   return (
@@ -135,7 +145,7 @@ function ObjectRow({
           toggleVisible();
         }}
         disabled={disabled}
-        title={visible ? "Hide in viewer" : "Show in viewer"}
+        title={visible ? "Hide overlay in viewer" : "Show overlay in viewer"}
         className={cn(
           "rounded p-0.5 transition hover:bg-[var(--color-hover)] hover:text-[var(--color-text)]",
           visible
@@ -146,32 +156,10 @@ function ObjectRow({
       >
         <VisIcon size={11} />
       </button>
-      <Box size={11} className={cn("shrink-0", !visible && "opacity-40")} />
+      <PenLine size={11} className={cn("shrink-0", !visible && "opacity-40")} />
       <span className={cn("flex-1 truncate font-mono", !visible && "opacity-50")}>
         {name}
       </span>
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          onOpenRequirements();
-        }}
-        title={
-          requirementCount > 0
-            ? `${requirementCount} requirement${requirementCount === 1 ? "" : "s"}`
-            : "Add requirements"
-        }
-        className={cn(
-          "flex items-center gap-0.5 rounded p-0.5 transition",
-          requirementCount > 0
-            ? "text-[var(--color-accent)] hover:bg-[var(--color-hover)]"
-            : "opacity-0 group-hover:opacity-60 hover:bg-[var(--color-hover)] hover:!opacity-100",
-        )}
-      >
-        <ListChecks size={11} />
-        {requirementCount > 0 && (
-          <span className="text-[10px] tabular-nums">{requirementCount}</span>
-        )}
-      </button>
       <button
         onClick={(e) => {
           e.stopPropagation();
@@ -188,8 +176,8 @@ function ObjectRow({
           e.stopPropagation();
           del();
         }}
-        disabled={!canDelete || disabled}
-        title={canDelete ? "Delete" : "Can't delete the only object"}
+        disabled={disabled}
+        title="Delete"
         className="rounded p-0.5 opacity-0 transition group-hover:opacity-60 hover:bg-[var(--color-hover)] hover:!opacity-100 disabled:opacity-0"
       >
         <Trash2 size={10} />
@@ -219,10 +207,14 @@ function CreateRow({
       return;
     }
     setBusy(true);
-    const r = await call<{ ok: boolean; error?: string }>("object_create", docId, trimmed);
+    const r = await call<{ ok: boolean; error?: string }>(
+      "sketch_create",
+      docId,
+      trimmed,
+    );
     setBusy(false);
     if (!r.ok) {
-      setErr(r.error || "could not create object");
+      setErr(r.error || "could not create sketch");
       return;
     }
     onDone();
@@ -231,7 +223,7 @@ function CreateRow({
   return (
     <div className="flex flex-col gap-1 rounded-sm bg-[var(--color-panel-2)] p-1.5">
       <div className="flex items-center gap-1">
-        <Box size={11} className="shrink-0 text-[var(--color-muted)]" />
+        <PenLine size={11} className="shrink-0 text-[var(--color-muted)]" />
         <input
           autoFocus
           value={name}
@@ -243,7 +235,7 @@ function CreateRow({
             if (e.key === "Enter") submit();
             else if (e.key === "Escape") onDone();
           }}
-          placeholder="object-name"
+          placeholder="sketch-name"
           className="min-w-0 flex-1 rounded-sm border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 py-0.5 font-mono text-xs outline-none focus:border-[var(--color-focus)]"
         />
         <button
@@ -289,7 +281,7 @@ function RenameRow({
     }
     setBusy(true);
     const r = await call<{ ok: boolean; error?: string }>(
-      "object_rename",
+      "sketch_rename",
       docId,
       oldName,
       trimmed,
@@ -305,7 +297,7 @@ function RenameRow({
   return (
     <div className="flex flex-col gap-1 rounded-sm bg-[var(--color-panel-2)] p-1.5">
       <div className="flex items-center gap-1">
-        <Box size={11} className="shrink-0 text-[var(--color-muted)]" />
+        <PenLine size={11} className="shrink-0 text-[var(--color-muted)]" />
         <input
           autoFocus
           value={name}

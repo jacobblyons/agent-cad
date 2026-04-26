@@ -31,8 +31,23 @@ from ..cad.script_runner import (
     run as run_script,
     scene as scene_script,
     snapshot as snapshot_script,
+    tessellate_sketch as tessellate_sketch_script,
 )
 from ..events import bus
+
+
+def _sketches_manifest(project: Project) -> list[dict]:
+    """Manifest entries for every sketch in the project — same shape as
+    api._sketches_manifest, kept here so the agent's subprocess runs see
+    the same sketch set the live viewer sees."""
+    return [
+        {
+            "name": s["name"],
+            "script": str(project.sketch_source_path(s["name"])),
+            "params": str(project.sketch_params_path(s["name"])),
+        }
+        for s in project.list_sketches()
+    ]
 
 
 def _ok(text: str, extra: list[dict] | None = None) -> dict:
@@ -91,13 +106,59 @@ class CadToolset:
     """Per-chat-turn handle the tools share.
 
     Caches loaded `model` globals per object so back-to-back tools that
-    don't change anything don't re-execute the script.
+    don't change anything don't re-execute the script. Cache entries are
+    invalidated whenever any sketch changes (since object scripts can
+    consume sketches and a stale cached model would hide the change).
     """
 
     def __init__(self, project: Project, render: Callable[[RunResult], None]):
         self.project = project
         self.render = render
         self._model_cache: dict[str, tuple] = {}
+        self._sketch_cache: dict[str, tuple] = {}
+
+    def _sketches_dict_in_process(self) -> dict:
+        """Run every sketch script in-process, returning a {name: cq.Workplane}
+        dict ready to be injected into an object script. Mirrors what
+        `_sketch_loader.load_sketches_from_manifest` does in the subprocess
+        runners — both must stay in sync."""
+        import cadquery as cq
+        from ..cad._sketch_loader import build_workplane_from_plane
+        out: dict = {}
+        for s in self.project.list_sketches():
+            name = s["name"]
+            script = self.project.sketch_source_path(name)
+            if not script.exists():
+                continue
+            params = self.project.read_sketch_params(name)
+            try:
+                globs = runpy.run_path(str(script), init_globals={"params": params})
+            except Exception:
+                continue
+            sketch = globs.get("sketch")
+            if sketch is None:
+                continue
+            plane = globs.get("plane", "XY")
+            try:
+                wp = build_workplane_from_plane(cq, plane).placeSketch(sketch)
+            except Exception:
+                continue
+            out[name] = wp
+        return out
+
+    def _sketches_signature(self) -> tuple:
+        """A hashable fingerprint of every sketch's source + params, used as
+        part of the model-cache key so a sketch change re-runs dependents."""
+        parts = []
+        for s in self.project.list_sketches():
+            name = s["name"]
+            try:
+                mtime = self.project.sketch_source_path(name).stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            params_blob = json.dumps(self.project.read_sketch_params(name), sort_keys=True)
+            parts.append((name, mtime, params_blob))
+        return tuple(parts)
 
     def load_object_in_process(self, name: str):
         """Run any object's script in this process and return its `model`."""
@@ -106,16 +167,45 @@ class CadToolset:
             raise FileNotFoundError(f"object {name!r} does not exist")
         st = script.stat().st_mtime
         params = self.project.read_object_params(name)
-        sig = (st, json.dumps(params, sort_keys=True))
+        sketch_sig = self._sketches_signature()
+        sig = (st, json.dumps(params, sort_keys=True), sketch_sig)
         cached = self._model_cache.get(name)
         if cached and cached[0] == sig:
             return cached[1]
-        globs = runpy.run_path(str(script), init_globals={"params": params})
+        sketches = self._sketches_dict_in_process()
+        globs = runpy.run_path(
+            str(script),
+            init_globals={"params": params, "sketches": sketches},
+        )
         model = globs.get("model")
         if model is None:
             raise RuntimeError(f"{script.name} finished without defining `model`")
         self._model_cache[name] = (sig, model)
         return model
+
+    def load_sketch_in_process(self, name: str):
+        """Run a sketch's script and return the placed `cq.Workplane`. Useful
+        for tools that want to inspect sketch geometry without needing a
+        full subprocess."""
+        if not self.project.sketch_exists(name):
+            raise FileNotFoundError(f"sketch {name!r} does not exist")
+        script = self.project.sketch_source_path(name)
+        st = script.stat().st_mtime
+        params = self.project.read_sketch_params(name)
+        sig = (st, json.dumps(params, sort_keys=True))
+        cached = self._sketch_cache.get(name)
+        if cached and cached[0] == sig:
+            return cached[1]
+        import cadquery as cq
+        from ..cad._sketch_loader import build_workplane_from_plane
+        globs = runpy.run_path(str(script), init_globals={"params": params})
+        sketch = globs.get("sketch")
+        if sketch is None:
+            raise RuntimeError(f"{script.name} finished without defining `sketch`")
+        plane = globs.get("plane", "XY")
+        wp = build_workplane_from_plane(cq, plane).placeSketch(sketch)
+        self._sketch_cache[name] = (sig, wp)
+        return wp
 
     def load_model_in_process(self):
         """Active object's model — convenience for tools that don't take an object name."""
@@ -123,6 +213,7 @@ class CadToolset:
 
     def invalidate(self) -> None:
         self._model_cache.clear()
+        self._sketch_cache.clear()
 
     def resolve_entity_ref(self, ref: str):
         """Resolve a ref like 'main', 'main.face[7]', '.edge[3]' to a CADQuery shape."""
@@ -174,25 +265,54 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
 
     @tool(
         "run_model",
-        "Execute the active object's script in a sandboxed subprocess. ALWAYS call this after editing the script to verify it parses and produces a valid Workplane. The new geometry is automatically pushed to the viewer. Returns ok/error and a brief meta summary (bbox, volume, face count). Errors include the Python traceback so you can fix them.",
+        "Execute the active artifact's script in a sandboxed subprocess. ALWAYS call this after editing the script to verify it parses. "
+        "If the active artifact is an OBJECT, runs its script (with all sketches injected as the `sketches` dict) and pushes the resulting GLB to the viewer. "
+        "If the active artifact is a SKETCH, runs the sketch script and pushes its 2D wires (projected onto its plane in 3D) to the viewer's overlay layer so the user can see the sketch. "
+        "Returns ok/error and a brief summary. Errors include the Python traceback so you can fix them.",
         {},
     )
     async def run_model(args):
         toolset.invalidate()
         proj = toolset.project
-        active = proj.active_object()
+        kind, name = proj.active_artifact()
+
+        if kind == "sketch":
+            sk = tessellate_sketch_script(
+                proj.sketch_source_path(name),
+                proj.sketch_params_path(name),
+                cwd=proj.path,
+                timeout=20.0,
+            )
+            # Push the sketch overlay event ourselves; the runner-level
+            # render callback is shaped for object RunResult.
+            bus.emit("doc_sketch_geometry", {
+                "doc_id": proj.id, "sketch": name,
+                "ok": sk.ok, "error": sk.error, "stderr": sk.stderr,
+                "plane": sk.plane, "polylines": sk.polylines, "bbox": sk.bbox,
+            })
+            bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+            if not sk.ok:
+                msg = sk.error or "sketch failed"
+                if sk.stderr:
+                    msg += "\n\nstderr:\n" + sk.stderr.strip()[-1500:]
+                return _err(msg)
+            n_lines = len(sk.polylines or [])
+            n_pts = sum(len(p.get("points") or []) for p in (sk.polylines or []))
+            return _ok(f"OK (sketch {name}). {n_lines} polyline(s), {n_pts} sample points.")
+
         result = run_script(
-            proj.object_source_path(active),
-            proj.object_params_path(active),
+            proj.object_source_path(name),
+            proj.object_params_path(name),
             cwd=proj.path,
             timeout=30.0,
+            sketches=_sketches_manifest(proj),
         )
         toolset.render(result)
         if result.ok:
             m = result.meta or {}
             bb = m.get("bbox", {})
             summary = (
-                f"OK ({active}). bbox size: {bb.get('size')}, "
+                f"OK ({name}). bbox size: {bb.get('size')}, "
                 f"volume: {m.get('volume'):.2f} mm^3, "
                 f"faces: {m.get('face_count')}, edges: {m.get('edge_count')}."
             )
@@ -227,6 +347,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             view_dict,
             cwd=proj.path,
             width=900, height=700, timeout=30.0,
+            sketches=_sketches_manifest(proj),
         )
         if not result.ok:
             msg = result.error or "snapshot failed"
@@ -272,26 +393,34 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
 
     @tool(
         "set_parameter",
-        "Define or update a named parameter for the active object. The script reads params via `params.get('name', default)`. The user can later tweak parameters in the Tweaks panel without rerunning the agent.",
+        "Define or update a named parameter for the active artifact (object OR sketch). The script reads params via `params.get('name', default)`. The user can later tweak parameters in the Tweaks panel without rerunning the agent. Each artifact has its own params namespace.",
         {"name": str, "value": float},
     )
     async def set_parameter(args):
         proj = toolset.project
-        active = proj.active_object()
-        params = proj.read_object_params(active)
-        params[args["name"]] = float(args["value"])
-        proj.write_object_params(active, params)
+        kind, target = proj.active_artifact()
+        if kind == "sketch":
+            params = proj.read_sketch_params(target)
+            params[args["name"]] = float(args["value"])
+            proj.write_sketch_params(target, params)
+        else:
+            params = proj.read_object_params(target)
+            params[args["name"]] = float(args["value"])
+            proj.write_object_params(target, params)
         toolset.invalidate()
-        return _ok(f"set {active}.{args['name']} = {args['value']}")
+        return _ok(f"set {kind} {target}.{args['name']} = {args['value']}")
 
     @tool(
         "list_parameters",
-        "Return the current parameters of the active object.",
+        "Return the current parameters of the active artifact (object or sketch).",
         {},
     )
     async def list_parameters(args):
         proj = toolset.project
-        return _ok(json.dumps(proj.read_object_params(proj.active_object()), indent=2))
+        kind, target = proj.active_artifact()
+        if kind == "sketch":
+            return _ok(json.dumps(proj.read_sketch_params(target), indent=2))
+        return _ok(json.dumps(proj.read_object_params(target), indent=2))
 
     # ===== topology queries ===========================================
 
@@ -514,7 +643,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             "view": view_dict,
             "width": 900, "height": 700,
         }
-        result = scene_script(spec, cwd=proj.path)
+        result = scene_script(spec, cwd=proj.path, sketches=_sketches_manifest(proj))
         if not result.ok:
             msg = result.error or "section render failed"
             if result.stderr:
@@ -557,7 +686,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             "view": view_dict,
             "width": 900, "height": 700,
         }
-        result = scene_script(spec, cwd=proj.path)
+        result = scene_script(spec, cwd=proj.path, sketches=_sketches_manifest(proj))
         if not result.ok:
             msg = result.error or "scene render failed"
             if result.stderr:
@@ -601,7 +730,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             "view": view_dict,
             "width": 900, "height": 700,
         }
-        result = scene_script(spec, cwd=proj.path)
+        result = scene_script(spec, cwd=proj.path, sketches=_sketches_manifest(proj))
         if not result.ok:
             msg = result.error or "boolean preview failed"
             if result.stderr:
@@ -619,21 +748,48 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
 
     @tool(
         "eval_expression",
-        "Evaluate a Python expression with `model` (cadquery.Workplane for the active object), `cq` (cadquery module), and `params` (dict) in scope. Use for ad-hoc measurements not covered by other tools — e.g. \"model.faces('>Z').val().Area()\" or \"model.val().BoundingBox().DiagonalLength\". The expression must be a single expression, not statements.",
+        "Evaluate a Python expression with the active artifact in scope. "
+        "For an active OBJECT: `model` (cq.Workplane), `cq`, `params`, `sketches` (dict of placed cq.Workplane). "
+        "For an active SKETCH: `sketch_wp` (cq.Workplane with the sketch placed), `sketch` (raw cq.Sketch), `cq`, `params`. "
+        "Use for ad-hoc inspection — e.g. \"model.faces('>Z').val().Area()\", \"sketch_wp.val().Edges()[0].Length()\". The expression must be a single expression, not statements.",
         {"expression": str},
     )
     async def eval_expression(args):
         expr = args["expression"]
+        proj = toolset.project
+        kind, name = proj.active_artifact()
         try:
             import cadquery as cq
-            model = toolset.load_model_in_process()
+            if kind == "sketch":
+                wp = toolset.load_sketch_in_process(name)
+                # Pull the raw cq.Sketch back out for direct introspection.
+                raw_sketch = None
+                try:
+                    if getattr(wp, "objects", None):
+                        for obj in wp.objects:
+                            if isinstance(obj, cq.Sketch):
+                                raw_sketch = obj
+                                break
+                except Exception:
+                    pass
+                ns = {
+                    "sketch_wp": wp,
+                    "sketch": raw_sketch,
+                    "cq": cq,
+                    "params": proj.read_sketch_params(name),
+                }
+            else:
+                model = toolset.load_object_in_process(name)
+                ns = {
+                    "model": model,
+                    "cq": cq,
+                    "params": proj.read_object_params(name),
+                    "sketches": toolset._sketches_dict_in_process(),
+                }
         except Exception as e:
-            return _err(f"could not load model: {e}")
+            return _err(f"could not load active artifact: {e}")
         try:
-            value = eval(expr, {
-                "model": model, "cq": cq,
-                "params": toolset.project.read_object_params(toolset.project.active_object()),
-            })
+            value = eval(expr, ns)
         except Exception as e:
             return _err(f"expression error: {e}\n\n{traceback.format_exc()}")
         return _ok(repr(value))
@@ -669,13 +825,20 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             proj.object_params_path(safe),
             cwd=proj.path,
             timeout=30.0,
+            sketches=_sketches_manifest(proj),
         )
         toolset.render(result)
-        return _ok(f"created object '{safe}' and made it active. The seed script is at objects/{safe}.py — read and edit it next.")
+        return _ok(
+            f"created object '{safe}' and made it active. The seed script is "
+            f"at objects/{safe}.py — read and edit it next. Remember: prefer "
+            f"to drive new geometry from a fully-constrained sketch via "
+            f"create_sketch + sketches['name'].extrude(...) rather than "
+            f"inlining the 2D profile here."
+        )
 
     @tool(
         "set_active_object",
-        "Switch which object is currently active. The Tweaks panel and all script-level tools (run_model, snapshot, measure, set_parameter) follow the active object. Note: the viewer renders every *visible* object; switching active does not change visibility.",
+        "Switch which object is currently active. Selecting an object also flips the edit target back to 'object' (so subsequent Read/Edit/Write hit the object's script, not whatever sketch was last open). The viewer renders every *visible* object; switching active does not change visibility.",
         {"name": str},
     )
     async def set_active_object(args):
@@ -687,6 +850,130 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
         toolset.invalidate()
         bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
         return _ok(f"active object is now '{args['name']}'")
+
+    # ===== sketch management ==========================================
+
+    @tool(
+        "list_sketches",
+        "List every sketch in this project. Returns each sketch's name, whether it's currently visible in the viewer overlay, and which sketch is active (if any).",
+        {},
+    )
+    async def list_sketches(args):
+        proj = toolset.project
+        return _ok(json.dumps({
+            "active_kind": proj.active_kind(),
+            "active_sketch": proj.active_sketch(),
+            "sketches": [
+                {"name": s["name"], "visible": s.get("visible", True)}
+                for s in proj.list_sketches()
+            ],
+        }, indent=2))
+
+    @tool(
+        "create_sketch",
+        "Create a new fully-constrained 2D sketch (a separate CADQuery script defining `sketch` and optionally `plane`). The new sketch becomes the active artifact, so subsequent Read / Edit / run_model calls work on it. Object scripts can consume sketches via the injected `sketches` dict — e.g. `sketches['profile'].extrude(20)`.",
+        {"name": str},
+    )
+    async def create_sketch(args):
+        proj = toolset.project
+        try:
+            safe = proj.create_sketch(args["name"])
+        except (ValueError, FileExistsError) as e:
+            return _err(str(e))
+        toolset.invalidate()
+        # Tessellate the seed sketch so the viewer overlay shows it.
+        sk = tessellate_sketch_script(
+            proj.sketch_source_path(safe),
+            proj.sketch_params_path(safe),
+            cwd=proj.path,
+            timeout=20.0,
+        )
+        bus.emit("doc_sketch_geometry", {
+            "doc_id": proj.id, "sketch": safe,
+            "ok": sk.ok, "error": sk.error, "stderr": sk.stderr,
+            "plane": sk.plane, "polylines": sk.polylines, "bbox": sk.bbox,
+        })
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+        return _ok(
+            f"created sketch '{safe}' and made it active. The seed script is "
+            f"at sketches/{safe}.py — read and edit it next. Remember: every "
+            f"dimension must be explicit (numeric or via params); use "
+            f".constrain(...).solve() if you need geometric constraints "
+            f"(coincident, parallel, perpendicular, distance, etc.)."
+        )
+
+    @tool(
+        "set_active_sketch",
+        "Switch the active artifact to a sketch. Read/Edit/Write and run_model now target this sketch. Use this before editing a sketch the user asked you to modify.",
+        {"name": str},
+    )
+    async def set_active_sketch(args):
+        proj = toolset.project
+        try:
+            proj.set_active_sketch(args["name"])
+        except FileNotFoundError as e:
+            return _err(str(e))
+        toolset.invalidate()
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+        return _ok(f"active sketch is now '{args['name']}' (edit target switched)")
+
+    @tool(
+        "snapshot_sketch",
+        "Render a PNG of one sketch on its plane — useful for verifying a fully-constrained profile before extruding from it. Pass a name or omit to use the active sketch. view: 'iso' | 'top' | 'front' | etc., or pass camera={'position','target','up'}.",
+        {"name": str, "view": str, "camera": dict},
+    )
+    async def snapshot_sketch(args):
+        proj = toolset.project
+        name = args.get("name") or proj.active_sketch()
+        if not name:
+            return _err("no sketch specified and no active sketch")
+        if not proj.sketch_exists(name):
+            return _err(f"sketch {name!r} does not exist")
+        try:
+            view_dict = _build_view_arg(args.get("view"), args.get("camera"))
+        except ValueError as e:
+            return _err(str(e))
+        # Snapshot's worker expects an object script — wrap the sketch in a
+        # tiny model script that turns the placed sketch into a degenerate
+        # 3D shape (faces only, zero thickness). Easiest path: write a temp
+        # "viewer" script that imports the real sketch script and exposes
+        # sketches' faces as a `model`.
+        # Simpler: render via the snapshot tool by extruding the sketch by
+        # a thin slab so VTK has surface area to render.
+        import tempfile as _tmp
+        import textwrap as _tw
+        viewer_dir = proj.path / ".agentcad-cache"
+        viewer_dir.mkdir(exist_ok=True)
+        viewer_path = viewer_dir / f"_sketch_view_{name}.py"
+        viewer_path.write_text(_tw.dedent(f'''
+            """Auto-generated transient view for sketch {name!r}."""
+            model = sketches[{name!r}].extrude(0.05)
+        ''').strip(), encoding="utf-8")
+        params_path = proj.sketch_params_path(name)
+        result = snapshot_script(
+            viewer_path,
+            params_path,
+            view_dict,
+            cwd=proj.path,
+            width=900, height=700, timeout=30.0,
+            sketches=_sketches_manifest(proj),
+        )
+        try:
+            viewer_path.unlink()
+        except OSError:
+            pass
+        if not result.ok:
+            msg = result.error or "snapshot_sketch failed"
+            if result.stderr:
+                msg += "\n\nstderr:\n" + result.stderr.strip()[-1500:]
+            return _err(msg)
+        label = view_dict.get("preset") or "custom camera"
+        return {
+            "content": [
+                {"type": "text", "text": f"sketch '{name}' on its plane, view '{label}':"},
+                _image_block(result.png_bytes or b""),
+            ]
+        }
 
     # ===== git / timeline =============================================
 
@@ -718,6 +1005,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
         section_snapshot, scene_snapshot, preview_boolean,
         eval_expression,
         list_objects, create_object, set_active_object,
+        list_sketches, create_sketch, set_active_sketch, snapshot_sketch,
         git_log, commit_turn,
     ]
 
@@ -745,6 +1033,10 @@ CAD_TOOL_NAMES = [
     "mcp__cad__list_objects",
     "mcp__cad__create_object",
     "mcp__cad__set_active_object",
+    "mcp__cad__list_sketches",
+    "mcp__cad__create_sketch",
+    "mcp__cad__set_active_sketch",
+    "mcp__cad__snapshot_sketch",
     "mcp__cad__git_log",
     "mcp__cad__commit_turn",
 ]

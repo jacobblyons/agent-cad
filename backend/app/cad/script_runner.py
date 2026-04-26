@@ -44,13 +44,35 @@ class RunResult:
 
 
 def run(script_path: Path, params_path: Path, *, cwd: Path | None = None,
-        timeout: float = 30.0, deflection: float = 0.1) -> RunResult:
-    """Run the given script in a subprocess with `params` injected."""
+        timeout: float = 30.0, deflection: float = 0.1,
+        sketches: list[dict] | None = None) -> RunResult:
+    """Run the given script in a subprocess with `params` injected.
+
+    `sketches`: optional list of {"name", "script", "params"} entries that
+    are loaded BEFORE the object script so they're available as a
+    `sketches` dict (name → placed cq.Workplane) to the script.
+    """
     script_path = Path(script_path).resolve()
     params_path = Path(params_path).resolve()
     cwd = Path(cwd).resolve() if cwd else script_path.parent
     glb_path = Path(tempfile.gettempdir()) / f"agentcad-{uuid.uuid4().hex}.glb"
     json_path = Path(tempfile.gettempdir()) / f"agentcad-{uuid.uuid4().hex}.json"
+    sketches_arg = "-"
+    sketches_path: Path | None = None
+    if sketches:
+        sketches_path = (
+            Path(tempfile.gettempdir()) / f"agentcad-sketches-{uuid.uuid4().hex}.json"
+        )
+        # Resolve all paths relative to the worker's view of the filesystem.
+        sketches_path.write_text(json.dumps([
+            {
+                "name": s["name"],
+                "script": str(Path(s["script"]).resolve()),
+                "params": str(Path(s["params"]).resolve()),
+            }
+            for s in sketches
+        ]), encoding="utf-8")
+        sketches_arg = str(sketches_path)
 
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
@@ -63,6 +85,7 @@ def run(script_path: Path, params_path: Path, *, cwd: Path | None = None,
                 sys.executable, "-m", "app.cad._script_worker",
                 str(script_path), str(params_path),
                 str(glb_path), str(json_path), str(deflection),
+                sketches_arg,
             ],
             capture_output=True, text=True, timeout=timeout, env=env,
             cwd=str(cwd),
@@ -122,16 +145,106 @@ class SnapshotResult:
     stderr: str = ""
 
 
+@dataclass
+class SketchResult:
+    """Tessellated polylines for a sketch, ready to ship to the viewer."""
+    ok: bool
+    error: str | None = None
+    plane: dict | None = None
+    polylines: list[dict] | None = None
+    bbox: dict | None = None
+    stderr: str = ""
+
+
+def tessellate_sketch(script_path: Path, params_path: Path, *,
+                      cwd: Path | None = None, timeout: float = 20.0,
+                      tol: float = 0.5) -> "SketchResult":
+    """Run a sketch script in a subprocess and return its wires as 3D
+    polylines."""
+    script_path = Path(script_path).resolve()
+    params_path = Path(params_path).resolve()
+    cwd = Path(cwd).resolve() if cwd else script_path.parent
+    json_path = Path(tempfile.gettempdir()) / f"agentcad-sketch-{uuid.uuid4().hex}.json"
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(_PKG_ROOT), env.get("PYTHONPATH", "")],
+    ).strip(os.pathsep)
+
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable, "-m", "app.cad._sketch_worker",
+                str(script_path), str(params_path), str(json_path), str(tol),
+            ],
+            capture_output=True, text=True, timeout=timeout, env=env,
+            cwd=str(cwd),
+        )
+    except subprocess.TimeoutExpired as e:
+        return SketchResult(
+            ok=False,
+            error=f"sketch tessellation exceeded {timeout}s",
+            stderr=(e.stderr or "") if isinstance(e.stderr, str) else "",
+        )
+
+    if not json_path.exists():
+        return SketchResult(
+            ok=False,
+            error=f"sketch worker produced no result file (exit {proc.returncode})",
+            stderr=proc.stderr,
+        )
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return SketchResult(ok=False, error=f"could not parse sketch result: {e}",
+                            stderr=proc.stderr)
+    finally:
+        try:
+            json_path.unlink()
+        except OSError:
+            pass
+
+    return SketchResult(
+        ok=bool(data.get("ok")),
+        error=data.get("error"),
+        plane=data.get("plane"),
+        polylines=data.get("polylines"),
+        bbox=data.get("bbox"),
+        stderr=proc.stderr,
+    )
+
+
 def scene(spec: dict, *, cwd: Path | None = None,
-          timeout: float = 45.0) -> "SnapshotResult":
+          timeout: float = 45.0,
+          sketches: list[dict] | None = None) -> "SnapshotResult":
     """Render a multi-item scene via the scene worker subprocess.
 
     spec shape: see _scene_worker.main docstring.
+
+    `sketches`: optional manifest entries shared across every item in the
+    scene; written to a temp JSON and referenced by path in the spec so a
+    long sketches list doesn't bloat the spec file.
     """
     cwd = Path(cwd).resolve() if cwd else Path.cwd()
     spec_path = Path(tempfile.gettempdir()) / f"agentcad-scene-{uuid.uuid4().hex}.json"
     png_path = Path(tempfile.gettempdir()) / f"agentcad-scene-{uuid.uuid4().hex}.png"
     json_path = Path(tempfile.gettempdir()) / f"agentcad-scene-{uuid.uuid4().hex}.json"
+
+    if sketches:
+        sketches_manifest_path = (
+            Path(tempfile.gettempdir())
+            / f"agentcad-sketches-{uuid.uuid4().hex}.json"
+        )
+        sketches_manifest_path.write_text(json.dumps([
+            {
+                "name": s["name"],
+                "script": str(Path(s["script"]).resolve()),
+                "params": str(Path(s["params"]).resolve()),
+            }
+            for s in sketches
+        ]), encoding="utf-8")
+        spec = dict(spec)
+        spec["sketches_manifest"] = str(sketches_manifest_path)
 
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
 
@@ -194,13 +307,34 @@ def scene(spec: dict, *, cwd: Path | None = None,
 
 def snapshot(script_path: Path, params_path: Path, view: dict, *,
              cwd: Path | None = None, width: int = 800, height: int = 600,
-             timeout: float = 30.0) -> SnapshotResult:
-    """Render a PNG snapshot of the given script via the snapshot worker subprocess."""
+             timeout: float = 30.0,
+             sketches: list[dict] | None = None) -> SnapshotResult:
+    """Render a PNG snapshot of the given script via the snapshot worker subprocess.
+
+    `sketches`: optional manifest entries — same shape as `run()`. The
+    snapshot worker injects them as a `sketches` dict so an object script
+    that consumes sketches renders correctly here too.
+    """
     script_path = Path(script_path).resolve()
     params_path = Path(params_path).resolve()
     cwd = Path(cwd).resolve() if cwd else script_path.parent
     png_path = Path(tempfile.gettempdir()) / f"agentcad-snap-{uuid.uuid4().hex}.png"
     json_path = Path(tempfile.gettempdir()) / f"agentcad-snap-{uuid.uuid4().hex}.json"
+    sketches_arg = "-"
+    if sketches:
+        sketches_path = (
+            Path(tempfile.gettempdir())
+            / f"agentcad-sketches-{uuid.uuid4().hex}.json"
+        )
+        sketches_path.write_text(json.dumps([
+            {
+                "name": s["name"],
+                "script": str(Path(s["script"]).resolve()),
+                "params": str(Path(s["params"]).resolve()),
+            }
+            for s in sketches
+        ]), encoding="utf-8")
+        sketches_arg = str(sketches_path)
 
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
@@ -215,6 +349,7 @@ def snapshot(script_path: Path, params_path: Path, view: dict, *,
                 json.dumps(view),
                 str(int(width)), str(int(height)),
                 str(png_path), str(json_path),
+                sketches_arg,
             ],
             capture_output=True, text=True, timeout=timeout, env=env,
             cwd=str(cwd),

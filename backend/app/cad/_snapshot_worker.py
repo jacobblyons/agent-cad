@@ -12,6 +12,7 @@ Argv:
     5 = height
     6 = output PNG path
     7 = output JSON path  (always written; ok=True/False)
+    8 = sketches manifest path (optional; '-' = none)
 """
 from __future__ import annotations
 
@@ -30,6 +31,9 @@ def main() -> int:
     height = int(sys.argv[5])
     png_out = Path(sys.argv[6])
     json_out = Path(sys.argv[7])
+    sketches_manifest = (
+        Path(sys.argv[8]) if len(sys.argv) > 8 and sys.argv[8] != "-" else None
+    )
 
     result: dict = {"ok": False, "error": None}
     try:
@@ -47,7 +51,13 @@ def main() -> int:
             json_out.write_text(json.dumps(result), encoding="utf-8")
             return 0
 
-        globs = runpy.run_path(str(script_path), init_globals={"params": params})
+        from app.cad._sketch_loader import load_sketches_from_manifest
+        sketches = load_sketches_from_manifest(sketches_manifest)
+
+        globs = runpy.run_path(
+            str(script_path),
+            init_globals={"params": params, "sketches": sketches},
+        )
         model = globs.get("model")
         if model is None:
             result["error"] = f"{script_path.name} finished without defining `model`"

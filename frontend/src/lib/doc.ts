@@ -23,6 +23,15 @@ export type ObjectMeta = {
   requirements: string[];
 };
 
+export type SketchMeta = {
+  name: string;
+  modified: number;
+  visible: boolean;
+};
+
+/** Whether the active edit target is an object or a sketch. */
+export type ActiveKind = "object" | "sketch";
+
 export type DocSummary = {
   id: string;          // absolute path to the project directory
   path: string;
@@ -32,8 +41,11 @@ export type DocSummary = {
   uncommitted: boolean;
   commits: Commit[];
   objects: ObjectMeta[];
+  sketches: SketchMeta[];
   active_object: string;
-  // Active object's params, surfaced for the Tweaks panel.
+  active_sketch: string | null;
+  active_kind: ActiveKind;
+  /** Active artifact's params (object or sketch), surfaced for the Tweaks panel. */
   params: Record<string, number>;
 };
 

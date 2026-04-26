@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { call } from "@/lib/pywebview";
-import { useDoc } from "@/lib/doc";
+import { useDoc, type ActiveKind } from "@/lib/doc";
 
 export function TweaksPanel() {
   const { doc } = useDoc();
@@ -13,13 +13,12 @@ export function TweaksPanel() {
         <span className="text-xs uppercase tracking-wider text-[var(--color-muted)]">
           Parameters
         </span>
-        {doc?.active_object && (
-          <span
-            className="truncate font-mono text-[10px] text-[var(--color-muted)]"
-            title={`active object: ${doc.active_object}`}
-          >
-            {doc.active_object}
-          </span>
+        {doc && (
+          <ActiveBadge
+            kind={doc.active_kind}
+            objectName={doc.active_object}
+            sketchName={doc.active_sketch}
+          />
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
@@ -36,6 +35,36 @@ export function TweaksPanel() {
         )}
       </div>
     </div>
+  );
+}
+
+function ActiveBadge({
+  kind,
+  objectName,
+  sketchName,
+}: {
+  kind: ActiveKind;
+  objectName: string;
+  sketchName: string | null;
+}) {
+  const name = kind === "sketch" ? sketchName ?? "(none)" : objectName;
+  const label = kind === "sketch" ? "sketch" : "object";
+  return (
+    <span
+      className="truncate font-mono text-[10px] text-[var(--color-muted)]"
+      title={`active ${label}: ${name}`}
+    >
+      <span
+        className={
+          kind === "sketch"
+            ? "mr-1 rounded-sm bg-[#7dd3fc]/15 px-1 text-[#7dd3fc]"
+            : "mr-1 rounded-sm bg-[var(--color-hover)] px-1"
+        }
+      >
+        {label}
+      </span>
+      {name}
+    </span>
   );
 }
 

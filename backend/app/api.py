@@ -13,8 +13,25 @@ import webview
 
 from . import __version__, settings
 from .cad.project import Project, list_recent
-from .cad.script_runner import RunResult, run as run_script
+from .cad.script_runner import (
+    RunResult,
+    run as run_script,
+    tessellate_sketch as tessellate_sketch_script,
+)
 from .events import bus
+
+
+def _sketches_manifest(project: Project) -> list[dict]:
+    """Manifest entries for every sketch in this project — handed to the
+    script / snapshot / scene runners so object scripts can consume them."""
+    return [
+        {
+            "name": s["name"],
+            "script": str(project.sketch_source_path(s["name"])),
+            "params": str(project.sketch_params_path(s["name"])),
+        }
+        for s in project.list_sketches()
+    ]
 
 
 class JsApi:
@@ -135,11 +152,28 @@ class JsApi:
         proj = self._projects.get(project_id)
         if proj is None:
             return {"ok": False, "error": "not_found"}
-        target = object_name or proj.active_object()
-        params = proj.read_object_params(target)
-        params[name] = float(value)
-        proj.write_object_params(target, params)
-        self._emit_object_geometry(proj, target)
+        # Tweaks-panel writes follow the active artifact (object or sketch).
+        # `object_name` is preserved for explicit overrides — if set, target
+        # that object regardless of the active kind.
+        if object_name:
+            kind = "object"
+            target = object_name
+        else:
+            kind, target = proj.active_artifact()
+        if kind == "sketch":
+            params = proj.read_sketch_params(target)
+            params[name] = float(value)
+            proj.write_sketch_params(target, params)
+            self._emit_sketch_geometry(proj, target)
+            # Sketch param changes propagate into any object that consumes it.
+            for o in proj.list_objects():
+                if o.get("visible", True):
+                    self._emit_object_geometry(proj, o["name"])
+        else:
+            params = proj.read_object_params(target)
+            params[name] = float(value)
+            proj.write_object_params(target, params)
+            self._emit_object_geometry(proj, target)
         bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
         return {"ok": True, "params": params}
 
@@ -260,6 +294,82 @@ class JsApi:
         bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
         return {"ok": True, "project": proj.to_json()}
 
+    # --- sketches ------------------------------------------------------
+
+    def sketch_create(self, project_id: str, name: str) -> dict:
+        proj = self._projects.get(project_id)
+        if proj is None:
+            return {"ok": False, "error": "not_found"}
+        try:
+            safe = proj.create_sketch(name)
+        except (ValueError, FileExistsError) as e:
+            return {"ok": False, "error": str(e)}
+        self._emit_sketch_geometry(proj, safe)
+        # New sketch may be referenced by visible objects; re-render them
+        # so their `sketches` dict is up to date in the viewer cache.
+        for o in proj.list_objects():
+            if o.get("visible", True):
+                self._emit_object_geometry(proj, o["name"])
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+        return {"ok": True, "name": safe, "project": proj.to_json()}
+
+    def sketch_rename(self, project_id: str, old: str, new: str) -> dict:
+        proj = self._projects.get(project_id)
+        if proj is None:
+            return {"ok": False, "error": "not_found"}
+        try:
+            safe = proj.rename_sketch(old, new)
+        except (ValueError, FileExistsError, FileNotFoundError) as e:
+            return {"ok": False, "error": str(e)}
+        if safe != old:
+            self._emit_sketch_geometry(proj, safe)
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+        return {"ok": True, "name": safe, "project": proj.to_json()}
+
+    def sketch_delete(self, project_id: str, name: str) -> dict:
+        proj = self._projects.get(project_id)
+        if proj is None:
+            return {"ok": False, "error": "not_found"}
+        try:
+            proj.delete_sketch(name)
+        except FileNotFoundError as e:
+            return {"ok": False, "error": str(e)}
+        # Drop the cached overlay on the frontend.
+        bus.emit("doc_sketch_geometry", {
+            "doc_id": proj.id, "sketch": name, "ok": False, "deleted": True,
+        })
+        # Object scripts that referenced this sketch will fail or change shape
+        # — re-render visible objects so the viewer reflects the new state.
+        for o in proj.list_objects():
+            if o.get("visible", True):
+                self._emit_object_geometry(proj, o["name"])
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+        return {"ok": True, "project": proj.to_json()}
+
+    def sketch_set_active(self, project_id: str, name: str) -> dict:
+        proj = self._projects.get(project_id)
+        if proj is None:
+            return {"ok": False, "error": "not_found"}
+        try:
+            proj.set_active_sketch(name)
+        except FileNotFoundError as e:
+            return {"ok": False, "error": str(e)}
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+        return {"ok": True, "project": proj.to_json()}
+
+    def sketch_set_visible(self, project_id: str, name: str, visible: bool) -> dict:
+        proj = self._projects.get(project_id)
+        if proj is None:
+            return {"ok": False, "error": "not_found"}
+        try:
+            proj.set_sketch_visible(name, bool(visible))
+        except FileNotFoundError as e:
+            return {"ok": False, "error": str(e)}
+        if visible:
+            self._emit_sketch_geometry(proj, name)
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+        return {"ok": True, "project": proj.to_json()}
+
     # --- timeline ------------------------------------------------------
 
     def timeline_checkout(self, project_id: str, ref: str) -> dict:
@@ -311,6 +421,7 @@ class JsApi:
                 project.object_params_path(name),
                 cwd=project.path,
                 timeout=30.0,
+                sketches=_sketches_manifest(project),
             )
         except Exception as e:
             bus.emit("doc_geometry", {
@@ -331,22 +442,66 @@ class JsApi:
             "topology": result.topology,
         })
 
+    def _emit_sketch_geometry(self, project: Project, name: str) -> None:
+        """Tessellate one sketch's wires and push to the viewer overlay."""
+        try:
+            result = tessellate_sketch_script(
+                project.sketch_source_path(name),
+                project.sketch_params_path(name),
+                cwd=project.path,
+                timeout=20.0,
+            )
+        except Exception as e:
+            bus.emit("doc_sketch_geometry", {
+                "doc_id": project.id,
+                "sketch": name,
+                "ok": False,
+                "error": f"sketch run failed: {e}",
+            })
+            return
+        bus.emit("doc_sketch_geometry", {
+            "doc_id": project.id,
+            "sketch": name,
+            "ok": result.ok,
+            "error": result.error,
+            "stderr": result.stderr,
+            "plane": result.plane,
+            "polylines": result.polylines,
+            "bbox": result.bbox,
+        })
+
     def _emit_all_visible_geometry(self, project: Project) -> None:
-        """Render every visible object and emit per-object geometry events."""
+        """Render every visible artifact (objects + sketches) and emit
+        per-item geometry events. Sketches are tessellated first so the
+        objects that consume them see fresh geometry on their own runs."""
+        # Sketches don't depend on each other, so order within the group is
+        # arbitrary — but they MUST come before objects that may consume them
+        # (the object runner reads each sketch's source on every invocation,
+        # so this isn't strictly required for correctness, just for ordering
+        # of the events the viewer sees).
+        for s in project.list_sketches():
+            if s.get("visible", True):
+                self._emit_sketch_geometry(project, s["name"])
         for o in project.list_objects():
             if o.get("visible", True):
                 self._emit_object_geometry(project, o["name"])
         bus.emit("project_state", {"doc_id": project.id, "state": project.to_json()})
 
     def _emit_run(self, project: Project, result: RunResult) -> None:
-        bus.emit("doc_geometry", {
-            "doc_id": project.id,
-            "object": project.active_object(),
-            "ok": result.ok,
-            "error": result.error,
-            "stderr": result.stderr,
-            "meta": result.meta,
-            "glb_b64": result.glb_b64,
-            "topology": result.topology,
-        })
+        kind, name = project.active_artifact()
+        if kind == "sketch":
+            # The agent's run_model on an active sketch surfaces sketch wires
+            # to the overlay rather than GLB to the 3D viewer.
+            self._emit_sketch_geometry(project, name)
+        else:
+            bus.emit("doc_geometry", {
+                "doc_id": project.id,
+                "object": name,
+                "ok": result.ok,
+                "error": result.error,
+                "stderr": result.stderr,
+                "meta": result.meta,
+                "glb_b64": result.glb_b64,
+                "topology": result.topology,
+            })
         bus.emit("project_state", {"doc_id": project.id, "state": project.to_json()})

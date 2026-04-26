@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { TweaksPanel } from "./TweaksPanel";
 import { ObjectBrowser } from "./ObjectBrowser";
+import { SketchBrowser } from "./SketchBrowser";
 
 const STORAGE_KEY = "agent-cad:right-sidebar:objects-h";
 const DEFAULT_PX = 220;
@@ -61,8 +62,16 @@ export function RightSidebar() {
         {/* invisible thicker hit area */}
         <div className="absolute inset-x-0 -top-1 -bottom-1" />
       </div>
-      <div className="shrink-0" style={{ height: `${objectsHeight}px` }}>
-        <ObjectBrowser />
+      <div
+        className="shrink-0 flex flex-col min-h-0"
+        style={{ height: `${objectsHeight}px` }}
+      >
+        <div className="min-h-0 flex-1 border-b border-[var(--color-border)]">
+          <ObjectBrowser />
+        </div>
+        <div className="min-h-0 flex-1">
+          <SketchBrowser />
+        </div>
       </div>
     </div>
   );

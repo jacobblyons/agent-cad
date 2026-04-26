@@ -24,7 +24,13 @@ import {
 
 import { base64ToArrayBuffer, useDoc } from "@/lib/doc";
 import { useChat, type EntityKind } from "@/lib/chat";
-import { useViewer, type EdgeMeta, type Topology, type VertexMeta } from "@/lib/viewer";
+import {
+  useViewer,
+  type EdgeMeta,
+  type SketchGeometry,
+  type Topology,
+  type VertexMeta,
+} from "@/lib/viewer";
 import { cn } from "@/lib/utils";
 import { DrawingDialog } from "./DrawingDialog";
 
@@ -491,6 +497,102 @@ function ViewerToolbar({
   );
 }
 
+// --- sketch overlays ----------------------------------------------------
+
+const SKETCH_COLOR = "#7dd3fc";        // sky-blue for inactive sketches
+const SKETCH_COLOR_ACTIVE = "#fbbf24"; // amber for the active edit target
+
+/**
+ * Render one polyline as a chain of line segments. Buffer is rebuilt
+ * whenever the polyline payload changes; we accept (closed, points) as
+ * inputs because a closed wire needs the last→first segment too.
+ */
+function SketchPolyline({
+  polyline,
+  color,
+}: {
+  polyline: { points: [number, number, number][]; closed: boolean };
+  color: string;
+}) {
+  const positions = useMemo(() => {
+    const pts = polyline.points;
+    if (!pts || pts.length < 2) return new Float32Array(0);
+    const segCount = polyline.closed ? pts.length : pts.length - 1;
+    const buf = new Float32Array(segCount * 6);
+    let off = 0;
+    for (let i = 0; i < segCount; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % pts.length];
+      buf[off++] = a[0]; buf[off++] = a[1]; buf[off++] = a[2];
+      buf[off++] = b[0]; buf[off++] = b[1]; buf[off++] = b[2];
+    }
+    return buf;
+  }, [polyline]);
+
+  const geometry = useMemo(() => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    return g;
+  }, [positions]);
+
+  const material = useMemo(
+    () =>
+      new THREE.LineBasicMaterial({
+        color,
+        depthTest: false,
+        depthWrite: false,
+        transparent: true,
+        opacity: 0.95,
+      }),
+    [color],
+  );
+
+  // Dispose on unmount so we don't leak when sketches change.
+  useEffect(() => {
+    return () => {
+      geometry.dispose();
+      material.dispose();
+    };
+  }, [geometry, material]);
+
+  if (positions.length === 0) return null;
+  // `renderOrder` is bumped so depthTest=false lines paint after solids and
+  // win the visual battle without flickering against shadow geometry.
+  return (
+    <primitive
+      object={new THREE.LineSegments(geometry, material)}
+      renderOrder={10}
+    />
+  );
+}
+
+function SketchOverlay({
+  sketches,
+  activeSketch,
+}: {
+  sketches: { name: string; geometry: SketchGeometry }[];
+  activeSketch: string | null;
+}) {
+  // Single rotation matches the GLB's CQ→three rotation — points stay in CQ
+  // coords inside this group.
+  return (
+    <group rotation={[-Math.PI / 2, 0, 0]}>
+      {sketches.map((s) => {
+        const polylines = s.geometry.polylines ?? [];
+        if (polylines.length === 0) return null;
+        const color = s.name === activeSketch ? SKETCH_COLOR_ACTIVE : SKETCH_COLOR;
+        return (
+          <group key={s.name}>
+            {polylines.map((p, i) => (
+              <SketchPolyline key={i} polyline={p} color={color} />
+            ))}
+          </group>
+        );
+      })}
+    </group>
+  );
+}
+
 function CursorTracker({ enabled }: { enabled: boolean }) {
   const { gl } = useThree();
   useEffect(() => {
@@ -534,7 +636,8 @@ function fmtArr(v: [number, number, number]): string {
 export function ViewerPane() {
   const { doc } = useDoc();
   const { send, addAttachment } = useChat();
-  const { visible, activeName, errorMsg } = useViewer();
+  const { visible, visibleSketches, activeName, errorMsg } = useViewer();
+  const activeSketch = doc?.active_sketch ?? null;
   const wrapperRef = useRef<HTMLDivElement>(null);
   const cameraRef = useRef<CameraSnap | null>(null);
   const [snapshot, setSnapshot] = useState<
@@ -746,6 +849,8 @@ export function ViewerPane() {
             onCancel={() => setPending(null)}
           />
         )}
+
+        <SketchOverlay sketches={visibleSketches} activeSketch={activeSketch} />
 
         {viewMode === "shaded" && (
           <ContactShadows

@@ -9,7 +9,7 @@
 import { createContext, useContext } from "react";
 import type { ChatImage, Turn } from "./chat";
 import type { DocSummary } from "./doc";
-import type { ObjectGeometry } from "./viewer";
+import type { ObjectGeometry, SketchGeometry } from "./viewer";
 
 export type TabState = {
   doc: DocSummary;
@@ -17,6 +17,8 @@ export type TabState = {
   // Per-object geometry, keyed by object name. Slots persist across visibility
   // toggles so hiding+showing doesn't force a re-render server-side.
   geometry: Record<string, ObjectGeometry>;
+  // Per-sketch tessellation, keyed by sketch name (same persistence rule).
+  sketchGeometry: Record<string, SketchGeometry>;
   // Attachments queued for the next chat send (sketches, viewer snapshots).
   // Cleared after a successful send.
   pendingAttachments: ChatImage[];

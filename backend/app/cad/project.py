@@ -1,22 +1,31 @@
 """An Agent CAD project — a directory on disk that's also a git repo.
 
-A project holds one or more *objects*. Each object is a CADQuery script
-plus its own parameters; the user (and the agent) work on one *active*
-object at a time. The viewer shows the active object; the timeline
-(git) is shared across all objects in the project.
+A project holds *objects* and *sketches*. An object is a CADQuery script
+that produces a Workplane (the actual 3D geometry); a sketch is a
+CADQuery script that produces a 2D profile (cq.Sketch) sitting on a
+named workplane in 3D space. Object scripts may consume sketches by
+name through an injected `sketches` dict; that lets the agent do the
+fully-constrained-sketch-first workflow Fusion users expect.
+
+The user (and agent) work on one *active artifact* at a time — either
+an object or a sketch. The viewer renders all visible objects as 3D
+geometry and all visible sketches as line overlays.
 
 Layout (current):
     <project>/
       .git/
       objects/
-        <name>.py            # CADQuery script for this object
-        <name>.params.json   # parameters for this object
-      state.json             # {"active_object": "<name>"}
-      chat.jsonl             # shared conversation history
+        <name>.py            # CADQuery script defining `model`
+        <name>.params.json
+      sketches/
+        <name>.py            # CADQuery script defining `sketch` (+ optional `plane`)
+        <name>.params.json
+      state.json             # {"active_kind": "object"|"sketch", "active_object": ..., "active_sketch": ...}
+      chat.jsonl
       assets/
 
 Legacy single-object layout (still supported on disk, auto-migrates the
-first time a 2nd object is added):
+first time a 2nd object or any sketch is added):
     <project>/
       .git/
       model.py
@@ -114,6 +123,11 @@ Conventions:
 - Define a top-level `model` (a cadquery.Workplane).
 - Read tweakable values from `params` (a dict) — the runtime injects this
   from the object's params.json so the user can adjust without re-committing.
+- Sketches defined in this project are injected as a `sketches` dict
+  (name → cq.Workplane already placed on the sketch's plane). When a
+  feature naturally maps to a 2D profile, prefer building the profile as
+  a sketch and extruding/lofting/sweeping from `sketches["name"]` rather
+  than inlining the geometry here.
 - Tag faces/sketches you intend to reference later, e.g. .tag("top").
 """
 import cadquery as cq
@@ -125,6 +139,36 @@ height = float(params.get("height", 15))
 model = cq.Workplane("XY").rect(length, width).extrude(height)
 '''
 SEED_PARAMS = {"length": 30, "width": 30, "height": 15}
+
+SEED_SKETCH = '''"""Agent CAD sketch — a fully-constrained 2D profile.
+
+Conventions:
+- Define a top-level `sketch` (a cadquery.Sketch). Build it with explicit
+  numeric dimensions or named params — never implicit defaults.
+- Optionally define `plane` to control where the sketch sits in 3D:
+    plane = "XY"               # default
+    plane = "XZ"               # vertical, normal +Y
+    plane = ("XY", 5.0)        # XY offset 5mm along +Z
+    plane = cq.Plane(...)      # full custom plane
+  If omitted, the sketch sits on XY at the origin.
+- Read tweakable values from `params` (a dict). Each sketch has its own
+  params namespace.
+- Use .constrain(...).solve() if you need explicit geometric constraints
+  beyond what .rect / .circle / .polyline already pin down.
+
+Object scripts can consume this sketch through an injected `sketches`
+dict — `sketches["this-name"]` is a cq.Workplane already placed on the
+sketch's plane, ready to .extrude() / .loft() / .sweep().
+"""
+import cadquery as cq
+
+length = float(params.get("length", 30))
+width  = float(params.get("width",  20))
+
+sketch = cq.Sketch().rect(length, width)
+plane = "XY"
+'''
+SEED_SKETCH_PARAMS = {"length": 30, "width": 20}
 
 
 @dataclass
@@ -179,12 +223,17 @@ class Project:
         (path / "assets").mkdir(exist_ok=True)
         objects_dir = path / "objects"
         objects_dir.mkdir(exist_ok=True)
+        (path / "sketches").mkdir(exist_ok=True)
         (objects_dir / f"{DEFAULT_OBJECT_NAME}.py").write_text(SEED_MODEL, encoding="utf-8")
         (objects_dir / f"{DEFAULT_OBJECT_NAME}.params.json").write_text(
             json.dumps(SEED_PARAMS, indent=2), encoding="utf-8",
         )
         (path / "state.json").write_text(
-            json.dumps({"active_object": DEFAULT_OBJECT_NAME}, indent=2), encoding="utf-8",
+            json.dumps({
+                "active_kind": "object",
+                "active_object": DEFAULT_OBJECT_NAME,
+                "active_sketch": None,
+            }, indent=2), encoding="utf-8",
         )
         (path / "chat.jsonl").write_text("", encoding="utf-8")
         (path / ".gitignore").write_text("__pycache__/\n*.pyc\n.agentcad-cache/\n", encoding="utf-8")
@@ -213,6 +262,10 @@ class Project:
     @property
     def objects_dir(self) -> Path:
         return self.path / "objects"
+
+    @property
+    def sketches_dir(self) -> Path:
+        return self.path / "sketches"
 
     @property
     def state_path(self) -> Path:
@@ -451,7 +504,148 @@ class Project:
             remaining = [o for o in objs if o != name]
             self.set_active_object(remaining[0])
 
-    # --- active-object pointer ----------------------------------------
+    # --- sketches -----------------------------------------------------
+
+    def _ensure_sketches_dir(self) -> None:
+        self.sketches_dir.mkdir(parents=True, exist_ok=True)
+
+    def list_sketches(self) -> list[dict]:
+        """All sketches in this project, ordered alphabetically."""
+        if not self.sketches_dir.is_dir():
+            return []
+        return [self._sketch_meta(p.stem) for p in sorted(self.sketches_dir.glob("*.py"))]
+
+    def _sketch_meta(self, name: str) -> dict:
+        src = self.sketch_source_path(name)
+        try:
+            mtime = src.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        return {
+            "name": name,
+            "modified": mtime,
+            "visible": self.is_sketch_visible(name),
+        }
+
+    def sketch_exists(self, name: str) -> bool:
+        return self.sketch_source_path(name).exists()
+
+    def sketch_source_path(self, name: str) -> Path:
+        return self.sketches_dir / f"{name}.py"
+
+    def sketch_params_path(self, name: str) -> Path:
+        return self.sketches_dir / f"{name}.params.json"
+
+    def read_sketch_source(self, name: str) -> str:
+        return self.sketch_source_path(name).read_text(encoding="utf-8")
+
+    def write_sketch_source(self, name: str, src: str) -> None:
+        path = self.sketch_source_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(src, encoding="utf-8")
+
+    def read_sketch_params(self, name: str) -> dict:
+        path = self.sketch_params_path(name)
+        try:
+            return json.loads(path.read_text(encoding="utf-8") or "{}")
+        except FileNotFoundError:
+            return {}
+
+    def write_sketch_params(self, name: str, params: dict) -> None:
+        path = self.sketch_params_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(params, indent=2), encoding="utf-8")
+
+    def is_sketch_visible(self, name: str) -> bool:
+        # Default: visible. The state.json key for sketches is separate from
+        # objects so the two visibility namespaces don't collide on identical
+        # names.
+        vis = self._read_state().get("sketch_visibility") or {}
+        return vis.get(name, True)
+
+    def set_sketch_visible(self, name: str, visible: bool) -> None:
+        if not self.sketch_exists(name):
+            raise FileNotFoundError(f"sketch '{name}' does not exist")
+        state = self._read_state()
+        vis = dict(state.get("sketch_visibility") or {})
+        if visible:
+            vis.pop(name, None)
+        else:
+            vis[name] = False
+        state["sketch_visibility"] = vis
+        self._write_state(state)
+
+    def create_sketch(self, name: str) -> str:
+        """Create a new sketch with the seed script. Returns the safe name."""
+        safe = sanitize_object_name(name)
+        if not safe:
+            raise ValueError("sketch name cannot be empty")
+        self._ensure_sketches_dir()
+        target = self.sketch_source_path(safe)
+        if target.exists():
+            raise FileExistsError(f"sketch '{safe}' already exists")
+        target.write_text(SEED_SKETCH, encoding="utf-8")
+        self.sketch_params_path(safe).write_text(
+            json.dumps(SEED_SKETCH_PARAMS, indent=2), encoding="utf-8",
+        )
+        self.set_active_sketch(safe)
+        return safe
+
+    def rename_sketch(self, old: str, new: str) -> str:
+        safe = sanitize_object_name(new)
+        if not safe:
+            raise ValueError("sketch name cannot be empty")
+        if safe == old:
+            return safe
+        src = self.sketch_source_path(old)
+        if not src.exists():
+            raise FileNotFoundError(f"sketch '{old}' does not exist")
+        dst = self.sketch_source_path(safe)
+        if dst.exists():
+            raise FileExistsError(f"sketch '{safe}' already exists")
+        shutil.move(str(src), str(dst))
+        old_params = self.sketch_params_path(old)
+        if old_params.exists():
+            shutil.move(str(old_params), str(self.sketch_params_path(safe)))
+        state = self._read_state()
+        dirty = False
+        vis = dict(state.get("sketch_visibility") or {})
+        if old in vis:
+            vis[safe] = vis.pop(old)
+            state["sketch_visibility"] = vis
+            dirty = True
+        if state.get("active_sketch") == old:
+            state["active_sketch"] = safe
+            dirty = True
+        if dirty:
+            self._write_state(state)
+        return safe
+
+    def delete_sketch(self, name: str) -> None:
+        if not self.sketch_exists(name):
+            raise FileNotFoundError(f"sketch '{name}' does not exist")
+        self.sketch_source_path(name).unlink()
+        params = self.sketch_params_path(name)
+        if params.exists():
+            params.unlink()
+        state = self._read_state()
+        dirty = False
+        vis = dict(state.get("sketch_visibility") or {})
+        if name in vis:
+            vis.pop(name)
+            state["sketch_visibility"] = vis
+            dirty = True
+        # Stepping off a deleted sketch: clear the pointer and flip back to
+        # the active object so the agent has somewhere to edit.
+        if state.get("active_sketch") == name:
+            state["active_sketch"] = None
+            if state.get("active_kind") == "sketch":
+                state["active_kind"] = "object"
+            dirty = True
+        if dirty:
+            self._write_state(state)
+
+    # --- active-artifact pointer --------------------------------------
 
     def _read_state(self) -> dict:
         if not self.state_path.exists():
@@ -481,7 +675,61 @@ class Project:
             raise FileNotFoundError(f"object '{name}' does not exist")
         state = self._read_state()
         state["active_object"] = name
+        # Selecting an object always flips the edit target to "object".
+        state["active_kind"] = "object"
         self._write_state(state)
+
+    def active_sketch(self) -> str | None:
+        """Name of the currently-selected sketch, or None if no sketch is
+        selected (or the previously-selected one was deleted)."""
+        sketches = [s["name"] for s in self.list_sketches()]
+        if not sketches:
+            return None
+        wanted = self._read_state().get("active_sketch")
+        return wanted if wanted in sketches else None
+
+    def set_active_sketch(self, name: str) -> None:
+        if not self.sketch_exists(name):
+            raise FileNotFoundError(f"sketch '{name}' does not exist")
+        state = self._read_state()
+        state["active_sketch"] = name
+        state["active_kind"] = "sketch"
+        self._write_state(state)
+
+    def active_kind(self) -> str:
+        """Whether the agent's edit target is the active object or the active
+        sketch. Defaults to 'object'. Falls back to 'object' if 'sketch' is
+        selected but no sketch exists."""
+        kind = self._read_state().get("active_kind") or "object"
+        if kind == "sketch" and self.active_sketch() is None:
+            return "object"
+        return kind
+
+    def active_artifact(self) -> tuple[str, str]:
+        """(kind, name) for whichever artifact is the current edit target.
+
+        Useful for the agent's edit/run tools: they all dispatch through this
+        single pointer rather than caring about objects vs. sketches
+        individually.
+        """
+        kind = self.active_kind()
+        if kind == "sketch":
+            name = self.active_sketch()
+            if name is not None:
+                return ("sketch", name)
+        return ("object", self.active_object())
+
+    def active_script_path(self) -> Path:
+        """Path the agent should Read/Edit/Write by default — follows the
+        active artifact."""
+        kind, name = self.active_artifact()
+        return (self.sketch_source_path(name) if kind == "sketch"
+                else self.object_source_path(name))
+
+    def active_script_params_path(self) -> Path:
+        kind, name = self.active_artifact()
+        return (self.sketch_params_path(name) if kind == "sketch"
+                else self.object_params_path(name))
 
     # Convenience for code that wants the active object's paths directly.
     @property
@@ -599,8 +847,17 @@ class Project:
 
     def to_json(self) -> dict:
         commits = self.log(limit=200)
-        active = self.active_object()
+        active_obj = self.active_object()
+        active_skt = self.active_sketch()
+        kind = self.active_kind()
         objects = self.list_objects()
+        sketches = self.list_sketches()
+        # Surface the active artifact's own params (not merged) — the Tweaks
+        # panel edits the file the user / agent is currently working on.
+        if kind == "sketch" and active_skt is not None:
+            params = self.read_sketch_params(active_skt)
+        else:
+            params = self.read_object_params(active_obj)
         return {
             "id": self.id,
             "path": str(self.path),
@@ -610,7 +867,9 @@ class Project:
             "uncommitted": self.has_uncommitted(),
             "commits": [c.to_json() for c in commits],
             "objects": objects,
-            "active_object": active,
-            # active object's params, surfaced at the top for the Tweaks panel.
-            "params": self.read_object_params(active),
+            "sketches": sketches,
+            "active_kind": kind,
+            "active_object": active_obj,
+            "active_sketch": active_skt,
+            "params": params,
         }

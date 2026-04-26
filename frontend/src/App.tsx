@@ -31,6 +31,16 @@ type GeometryEvent = {
   error?: string;
 };
 
+type SketchGeometryEvent = {
+  doc_id: string;
+  sketch: string;
+  ok?: boolean;
+  error?: string;
+  deleted?: boolean;
+  polylines?: { points: [number, number, number][]; closed: boolean }[] | null;
+  plane?: import("@/lib/viewer").SketchGeometry["plane"];
+};
+
 type ChatEvent = {
   doc_id: string;
   msg_id: string;
@@ -63,7 +73,16 @@ export default function App() {
       // De-dupe: opening the same project twice just focuses the existing tab.
       const existing = cur.find((t) => t.doc.id === d.id);
       if (existing) return cur.map((t) => (t.doc.id === d.id ? { ...t, doc: d } : t));
-      return [...cur, { doc: d, turns: [], geometry: {}, pendingAttachments: [] }];
+      return [
+        ...cur,
+        {
+          doc: d,
+          turns: [],
+          geometry: {},
+          sketchGeometry: {},
+          pendingAttachments: [],
+        },
+      ];
     });
     setActiveId(d.id);
   }, []);
@@ -232,6 +251,38 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    return on<SketchGeometryEvent>("doc_sketch_geometry", (p) => {
+      setTabs((cur) =>
+        cur.map((t) => {
+          if (t.doc.id !== p.doc_id) return t;
+          // Sketch deleted on the backend → drop the cached overlay.
+          if (p.deleted) {
+            const next = { ...t.sketchGeometry };
+            delete next[p.sketch];
+            return { ...t, sketchGeometry: next };
+          }
+          const prev = t.sketchGeometry[p.sketch] ?? {
+            polylines: null,
+            plane: null,
+            errorMsg: null,
+          };
+          return {
+            ...t,
+            sketchGeometry: {
+              ...t.sketchGeometry,
+              [p.sketch]: {
+                polylines: p.polylines ?? prev.polylines,
+                plane: p.plane ?? prev.plane,
+                errorMsg: p.error ?? null,
+              },
+            },
+          };
+        }),
+      );
+    });
+  }, []);
+
+  useEffect(() => {
     return on<ChatEvent>("chat_event", (e) => {
       setTabs((cur) =>
         cur.map((t) =>
@@ -316,7 +367,7 @@ export default function App() {
 
   const viewerCtx = useMemo(() => {
     if (!activeTab) {
-      return { visible: [], activeName: null, errorMsg: null };
+      return { visible: [], visibleSketches: [], activeName: null, errorMsg: null };
     }
     const objects = activeTab.doc.objects ?? [];
     const visible = objects
@@ -329,11 +380,22 @@ export default function App() {
           errorMsg: null,
         },
       }));
+    const sketches = activeTab.doc.sketches ?? [];
+    const visibleSketches = sketches
+      .filter((s) => s.visible)
+      .map((s) => ({
+        name: s.name,
+        geometry: activeTab.sketchGeometry[s.name] ?? {
+          polylines: null,
+          plane: null,
+          errorMsg: null,
+        },
+      }));
     const activeName = activeTab.doc.active_object ?? null;
     const errorMsg = activeName
       ? activeTab.geometry[activeName]?.errorMsg ?? null
       : null;
-    return { visible, activeName, errorMsg };
+    return { visible, visibleSketches, activeName, errorMsg };
   }, [activeTab]);
 
   return (

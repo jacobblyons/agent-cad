@@ -6,6 +6,20 @@ Argv:
     3 = output glb path
     4 = output json path  (always written; ok=True/False)
     5 = tessellation deflection (float)
+    6 = sketches manifest path (optional; '-' = none)
+
+Sketches manifest format (JSON):
+    [
+      {"name": "base", "script": "/abs/path/sketches/base.py",
+                       "params": "/abs/path/sketches/base.params.json"},
+      ...
+    ]
+Each sketch script is run before the object's script. Each must define
+top-level `sketch` (a cq.Sketch) and may define `plane` (a string like
+"XY", a (str, float) offset tuple, or a full cq.Plane). The runtime
+builds `cq.Workplane(plane).placeSketch(sketch)` and accumulates these
+into a `sketches` dict that's injected into the object script alongside
+its own `params`.
 """
 from __future__ import annotations
 
@@ -47,6 +61,9 @@ def main() -> int:
     glb_out = Path(sys.argv[3])
     json_out = Path(sys.argv[4])
     deflection = float(sys.argv[5])
+    sketches_manifest = (
+        Path(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6] != "-" else None
+    )
 
     result: dict = {"ok": False, "error": None, "meta": None}
     try:
@@ -64,7 +81,13 @@ def main() -> int:
             json_out.write_text(json.dumps(result), encoding="utf-8")
             return 0
 
-        globs = runpy.run_path(str(script_path), init_globals={"params": params})
+        from app.cad._sketch_loader import load_sketches_from_manifest
+        sketches = load_sketches_from_manifest(sketches_manifest)
+
+        globs = runpy.run_path(
+            str(script_path),
+            init_globals={"params": params, "sketches": sketches},
+        )
 
         model = globs.get("model")
         if model is None:
