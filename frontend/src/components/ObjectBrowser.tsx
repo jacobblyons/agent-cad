@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Box, Plus, Trash2, Pencil, Check, X } from "lucide-react";
+import { Box, Eye, EyeOff, Plus, Trash2, Pencil, Check, X } from "lucide-react";
 import { call } from "@/lib/pywebview";
 import { useDoc } from "@/lib/doc";
 import { useChat } from "@/lib/chat";
@@ -46,6 +46,7 @@ export function ObjectBrowser() {
                 docId={doc.id}
                 name={o.name}
                 active={o.name === doc.active_object}
+                visible={o.visible}
                 canDelete={objects.length > 1}
                 disabled={isAgentRunning}
                 onRename={() => setRenaming(o.name)}
@@ -69,6 +70,7 @@ function ObjectRow({
   docId,
   name,
   active,
+  visible,
   canDelete,
   disabled,
   onRename,
@@ -76,6 +78,7 @@ function ObjectRow({
   docId: string;
   name: string;
   active: boolean;
+  visible: boolean;
   canDelete: boolean;
   disabled: boolean;
   onRename: () => void;
@@ -84,11 +87,16 @@ function ObjectRow({
     if (active || disabled) return;
     await call("object_set_active", docId, name);
   };
+  const toggleVisible = async () => {
+    if (disabled) return;
+    await call("object_set_visible", docId, name, !visible);
+  };
   const del = async () => {
     if (!canDelete || disabled) return;
     if (!window.confirm(`Delete object "${name}"? This can be undone via the timeline.`)) return;
     await call("object_delete", docId, name);
   };
+  const VisIcon = visible ? Eye : EyeOff;
   return (
     <div
       role="button"
@@ -102,8 +110,27 @@ function ObjectRow({
         !disabled && !active && "cursor-pointer",
       )}
     >
-      <Box size={11} className="shrink-0" />
-      <span className="flex-1 truncate font-mono">{name}</span>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          toggleVisible();
+        }}
+        disabled={disabled}
+        title={visible ? "Hide in viewer" : "Show in viewer"}
+        className={cn(
+          "rounded p-0.5 transition hover:bg-[var(--color-hover)] hover:text-[var(--color-text)]",
+          visible
+            ? "opacity-0 group-hover:opacity-60 hover:!opacity-100"
+            : "opacity-100 text-[var(--color-muted)]",
+          disabled && "opacity-30",
+        )}
+      >
+        <VisIcon size={11} />
+      </button>
+      <Box size={11} className={cn("shrink-0", !visible && "opacity-40")} />
+      <span className={cn("flex-1 truncate font-mono", !visible && "opacity-50")}>
+        {name}
+      </span>
       <button
         onClick={(e) => {
           e.stopPropagation();

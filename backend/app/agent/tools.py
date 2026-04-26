@@ -613,12 +613,18 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
         except (ValueError, FileExistsError) as e:
             return _err(str(e))
         toolset.invalidate()
-        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+        result = run_script(
+            proj.object_source_path(safe),
+            proj.object_params_path(safe),
+            cwd=proj.path,
+            timeout=30.0,
+        )
+        toolset.render(result)
         return _ok(f"created object '{safe}' and made it active. The seed script is at objects/{safe}.py — read and edit it next.")
 
     @tool(
         "set_active_object",
-        "Switch which object is currently active. The viewer, Tweaks panel, and all script-level tools (run_model, snapshot, measure, set_parameter) follow the active object.",
+        "Switch which object is currently active. The Tweaks panel and all script-level tools (run_model, snapshot, measure, set_parameter) follow the active object. Note: the viewer renders every *visible* object; switching active does not change visibility.",
         {"name": str},
     )
     async def set_active_object(args):

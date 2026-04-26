@@ -23,6 +23,7 @@ type StateEvent = { doc_id: string; state: DocSummary };
 
 type GeometryEvent = {
   doc_id: string;
+  object: string;
   glb_b64?: string;
   topology?: import("@/lib/viewer").Topology | null;
   error?: string;
@@ -60,7 +61,7 @@ export default function App() {
       // De-dupe: opening the same project twice just focuses the existing tab.
       const existing = cur.find((t) => t.doc.id === d.id);
       if (existing) return cur.map((t) => (t.doc.id === d.id ? { ...t, doc: d } : t));
-      return [...cur, { doc: d, turns: [], glbB64: null, topology: null, errorMsg: null }];
+      return [...cur, { doc: d, turns: [], geometry: {} }];
     });
     setActiveId(d.id);
   }, []);
@@ -160,16 +161,25 @@ export default function App() {
   useEffect(() => {
     return on<GeometryEvent>("doc_geometry", (p) => {
       setTabs((cur) =>
-        cur.map((t) =>
-          t.doc.id === p.doc_id
-            ? {
-                ...t,
-                glbB64: p.glb_b64 ?? t.glbB64,
-                topology: p.topology ?? t.topology,
+        cur.map((t) => {
+          if (t.doc.id !== p.doc_id) return t;
+          const prev = t.geometry[p.object] ?? {
+            glbB64: null,
+            topology: null,
+            errorMsg: null,
+          };
+          return {
+            ...t,
+            geometry: {
+              ...t.geometry,
+              [p.object]: {
+                glbB64: p.glb_b64 ?? prev.glbB64,
+                topology: p.topology ?? prev.topology,
                 errorMsg: p.error ?? null,
-              }
-            : t,
-        ),
+              },
+            },
+          };
+        }),
       );
     });
   }, []);
@@ -250,14 +260,27 @@ export default function App() {
     [activeTab, isAgentRunning, send],
   );
 
-  const viewerCtx = useMemo(
-    () => ({
-      glbB64: activeTab?.glbB64 ?? null,
-      topology: activeTab?.topology ?? null,
-      errorMsg: activeTab?.errorMsg ?? null,
-    }),
-    [activeTab],
-  );
+  const viewerCtx = useMemo(() => {
+    if (!activeTab) {
+      return { visible: [], activeName: null, errorMsg: null };
+    }
+    const objects = activeTab.doc.objects ?? [];
+    const visible = objects
+      .filter((o) => o.visible)
+      .map((o) => ({
+        name: o.name,
+        geometry: activeTab.geometry[o.name] ?? {
+          glbB64: null,
+          topology: null,
+          errorMsg: null,
+        },
+      }));
+    const activeName = activeTab.doc.active_object ?? null;
+    const errorMsg = activeName
+      ? activeTab.geometry[activeName]?.errorMsg ?? null
+      : null;
+    return { visible, activeName, errorMsg };
+  }, [activeTab]);
 
   return (
     <UiContext.Provider value={ui}>

@@ -66,7 +66,7 @@ class JsApi:
         except Exception as e:
             return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
         self._projects[project.id] = project
-        self._run_and_emit(project)
+        self._emit_all_visible_geometry(project)
         return {"ok": True, "project": project.to_json()}
 
     def project_open(self, path: str) -> dict:
@@ -75,7 +75,7 @@ class JsApi:
         except Exception as e:
             return {"ok": False, "error": str(e)}
         self._projects[project.id] = project
-        self._run_and_emit(project)
+        self._emit_all_visible_geometry(project)
         return {"ok": True, "project": project.to_json()}
 
     def project_pick_external(self) -> dict:
@@ -126,8 +126,8 @@ class JsApi:
             proj.write_object_source(name, source)
         except FileNotFoundError as e:
             return {"ok": False, "error": str(e)}
-        if name == proj.active_object():
-            self._run_and_emit(proj)
+        self._emit_object_geometry(proj, name)
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
         return {"ok": True}
 
     def project_set_parameter(self, project_id: str, name: str, value: float,
@@ -139,15 +139,15 @@ class JsApi:
         params = proj.read_object_params(target)
         params[name] = float(value)
         proj.write_object_params(target, params)
-        if target == proj.active_object():
-            self._run_and_emit(proj)
+        self._emit_object_geometry(proj, target)
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
         return {"ok": True, "params": params}
 
     def project_refresh(self, project_id: str) -> dict:
         proj = self._projects.get(project_id)
         if proj is None:
             return {"ok": False, "error": "not_found"}
-        self._run_and_emit(proj)
+        self._emit_all_visible_geometry(proj)
         return {"ok": True}
 
     def project_commit(self, project_id: str, subject: str = "save") -> dict:
@@ -192,7 +192,8 @@ class JsApi:
             safe = proj.create_object(name)
         except (ValueError, FileExistsError) as e:
             return {"ok": False, "error": str(e)}
-        self._run_and_emit(proj)
+        self._emit_object_geometry(proj, safe)
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
         return {"ok": True, "name": safe, "project": proj.to_json()}
 
     def object_rename(self, project_id: str, old: str, new: str) -> dict:
@@ -203,6 +204,9 @@ class JsApi:
             safe = proj.rename_object(old, new)
         except (ValueError, FileExistsError, FileNotFoundError) as e:
             return {"ok": False, "error": str(e)}
+        # The viewer's GLB cache is keyed by name — re-emit so the new key exists.
+        if safe != old:
+            self._emit_object_geometry(proj, safe)
         bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
         return {"ok": True, "name": safe, "project": proj.to_json()}
 
@@ -214,8 +218,7 @@ class JsApi:
             proj.delete_object(name)
         except (ValueError, FileNotFoundError) as e:
             return {"ok": False, "error": str(e)}
-        # delete may have switched active object → re-render.
-        self._run_and_emit(proj)
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
         return {"ok": True, "project": proj.to_json()}
 
     def object_set_active(self, project_id: str, name: str) -> dict:
@@ -226,7 +229,23 @@ class JsApi:
             proj.set_active_object(name)
         except FileNotFoundError as e:
             return {"ok": False, "error": str(e)}
-        self._run_and_emit(proj)
+        # No geometry emit — every visible object is already in the viewer.
+        # active_object now controls only the params panel and edit target.
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+        return {"ok": True, "project": proj.to_json()}
+
+    def object_set_visible(self, project_id: str, name: str, visible: bool) -> dict:
+        proj = self._projects.get(project_id)
+        if proj is None:
+            return {"ok": False, "error": "not_found"}
+        try:
+            proj.set_object_visible(name, bool(visible))
+        except FileNotFoundError as e:
+            return {"ok": False, "error": str(e)}
+        # On toggling visible, ensure the GLB is in the viewer's cache.
+        if visible:
+            self._emit_object_geometry(proj, name)
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
         return {"ok": True, "project": proj.to_json()}
 
     # --- timeline ------------------------------------------------------
@@ -237,7 +256,7 @@ class JsApi:
             return {"ok": False, "error": "not_found"}
         try:
             proj.checkout(ref)
-            self._run_and_emit(proj)
+            self._emit_all_visible_geometry(proj)
             return {"ok": True, "project": proj.to_json()}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -248,7 +267,7 @@ class JsApi:
             return {"ok": False, "error": "not_found"}
         try:
             branch = proj.branch_at(ref, name)
-            self._run_and_emit(proj)
+            self._emit_all_visible_geometry(proj)
             return {"ok": True, "branch": branch, "project": proj.to_json()}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -272,25 +291,40 @@ class JsApi:
 
     # --- internals ----------------------------------------------------
 
-    def _run_and_emit(self, project: Project) -> None:
-        active = project.active_object()
+    def _emit_object_geometry(self, project: Project, name: str) -> None:
+        """Run one object's script and push its geometry to the viewer."""
         try:
             result = run_script(
-                project.object_source_path(active),
-                project.object_params_path(active),
+                project.object_source_path(name),
+                project.object_params_path(name),
                 cwd=project.path,
                 timeout=30.0,
             )
         except Exception as e:
             bus.emit("doc_geometry", {
                 "doc_id": project.id,
-                "object": active,
+                "object": name,
                 "error": f"run failed: {e}",
                 "trace": traceback.format_exc(),
             })
-            bus.emit("project_state", {"doc_id": project.id, "state": project.to_json()})
             return
-        self._emit_run(project, result)
+        bus.emit("doc_geometry", {
+            "doc_id": project.id,
+            "object": name,
+            "ok": result.ok,
+            "error": result.error,
+            "stderr": result.stderr,
+            "meta": result.meta,
+            "glb_b64": result.glb_b64,
+            "topology": result.topology,
+        })
+
+    def _emit_all_visible_geometry(self, project: Project) -> None:
+        """Render every visible object and emit per-object geometry events."""
+        for o in project.list_objects():
+            if o.get("visible", True):
+                self._emit_object_geometry(project, o["name"])
+        bus.emit("project_state", {"doc_id": project.id, "state": project.to_json()})
 
     def _emit_run(self, project: Project, result: RunResult) -> None:
         bus.emit("doc_geometry", {

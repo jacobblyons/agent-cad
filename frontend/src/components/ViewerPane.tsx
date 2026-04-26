@@ -41,12 +41,24 @@ const ENTITY_OPTIONS: { id: EntityKind; label: string; Icon: typeof Box }[] = [
   { id: "vertex", label: "Vertex", Icon: CircleDot },
 ];
 
-const FACE_COLOR_SHADED = "#c4cdd9";
-const FACE_COLOR_UNSHADED = "#7a8392";
 const EDGE_COLOR_DARK = "#1a1d22";
-const EDGE_COLOR_LIGHT = "#cfd5df";
 const HOVER_COLOR = 0x007acc;
 const PIN_COLOR = 0xf59e0b;
+
+// Palette for per-object body / wireframe colors. Mirrors the backend's
+// snapshot palette so the viewer and agent renders use the same hues.
+const OBJECT_PALETTE = [
+  "#c4cdd9",  // cool grey  (default)
+  "#dba075",  // warm tan
+  "#8cc8d8",  // cyan-grey
+  "#dbc78c",  // warm yellow
+  "#c48cdb",  // purple
+  "#8cdb9b",  // green
+];
+
+function colorForIndex(i: number): string {
+  return OBJECT_PALETTE[((i % OBJECT_PALETTE.length) + OBJECT_PALETTE.length) % OBJECT_PALETTE.length];
+}
 
 // Raycast tuning. Lines need a generous threshold or you can never click
 // them (they're 1px wide on screen). Vertex spheres pick reliably via mesh
@@ -83,12 +95,14 @@ function findEntity(
 function FacesGroup({
   glbB64,
   viewMode,
+  bodyColor,
   active,         // true if face is the current pick kind in annotate mode
   hoveredFace,
   pinnedFace,
 }: {
   glbB64: string | null;
   viewMode: ViewMode;
+  bodyColor: string;
   active: boolean;
   hoveredFace: number | null;
   pinnedFace: number | null;
@@ -133,7 +147,7 @@ function FacesGroup({
       switch (viewMode) {
         case "shaded":
           mesh.material = new THREE.MeshStandardMaterial({
-            color: FACE_COLOR_SHADED,
+            color: bodyColor,
             metalness: 0.18,
             roughness: 0.42,
             envMapIntensity: 0.7,
@@ -142,7 +156,7 @@ function FacesGroup({
           mesh.receiveShadow = true;
           break;
         case "unshaded":
-          mesh.material = new THREE.MeshBasicMaterial({ color: FACE_COLOR_UNSHADED });
+          mesh.material = new THREE.MeshBasicMaterial({ color: bodyColor });
           mesh.castShadow = false;
           mesh.receiveShadow = false;
           break;
@@ -153,7 +167,7 @@ function FacesGroup({
           break;
       }
     });
-  }, [root, viewMode]);
+  }, [root, viewMode, bodyColor]);
 
   // Raycast gating — only meshes whose entity kind matches the active pick
   // kind should intercept clicks. Otherwise faces would always block edge
@@ -185,10 +199,10 @@ function FacesGroup({
       if (!("color" in mat)) return;
       if (idx === pinnedFace) mat.color.setHex(PIN_COLOR);
       else if (idx === hoveredFace) mat.color.setHex(HOVER_COLOR);
-      else mat.color.set(viewMode === "shaded" ? FACE_COLOR_SHADED : FACE_COLOR_UNSHADED);
+      else mat.color.set(bodyColor);
       mat.needsUpdate = true;
     });
-  }, [root, hoveredFace, pinnedFace, viewMode]);
+  }, [root, hoveredFace, pinnedFace, viewMode, bodyColor]);
 
   if (!root) return null;
   return <primitive object={root} />;
@@ -199,19 +213,21 @@ function FacesGroup({
 function EdgesGroup({
   topology,
   viewMode,
+  wireColor,
   active,
   hoveredEdge,
   pinnedEdge,
 }: {
   topology: Topology | null;
   viewMode: ViewMode;
+  wireColor: string;
   active: boolean;
   hoveredEdge: number | null;
   pinnedEdge: number | null;
 }) {
   const groupRef = useRef<THREE.Group>(null);
   const edges = topology?.edges ?? [];
-  const baseColor = viewMode === "wireframe" ? EDGE_COLOR_LIGHT : EDGE_COLOR_DARK;
+  const baseColor = viewMode === "wireframe" ? wireColor : EDGE_COLOR_DARK;
 
   const edgeObjects = useMemo(
     () => edges.map((edge) => buildEdgeLine(edge, baseColor)),
@@ -479,7 +495,7 @@ function CursorTracker({ enabled }: { enabled: boolean }) {
 export function ViewerPane() {
   const { doc } = useDoc();
   const { send } = useChat();
-  const { glbB64, topology, errorMsg } = useViewer();
+  const { visible, activeName, errorMsg } = useViewer();
 
   const [viewMode, setViewMode] = useState<ViewMode>(
     () => (localStorage.getItem("agentcad:viewMode") as ViewMode) || "shaded",
@@ -519,10 +535,16 @@ export function ViewerPane() {
     return () => window.removeEventListener("keydown", onKey);
   }, [pending, toolMode]);
 
+  const activeGeometry = useMemo(
+    () => (activeName ? visible.find((v) => v.name === activeName)?.geometry ?? null : null),
+    [visible, activeName],
+  );
+  const activeTopology = activeGeometry?.topology ?? null;
+
   const lookupType = (kind: EntityKind, index: number | null): string | null => {
-    if (!topology || index == null) return null;
-    if (kind === "face") return topology.faces.find((x) => x.index === index)?.type ?? null;
-    if (kind === "edge") return topology.edges.find((x) => x.index === index)?.type ?? null;
+    if (!activeTopology || index == null) return null;
+    if (kind === "face") return activeTopology.faces.find((x) => x.index === index)?.type ?? null;
+    if (kind === "edge") return activeTopology.edges.find((x) => x.index === index)?.type ?? null;
     return null;
   };
 
@@ -615,28 +637,42 @@ export function ViewerPane() {
           )}
         </Suspense>
 
-        {/* All pickable scene under one event-handling group. */}
+        {/* All pickable scene under one event-handling group. Picking is
+            scoped to the active object only; other visible objects render but
+            don't intercept clicks. */}
         <group onClick={handleClick} onPointerMove={handleHover}>
-          <FacesGroup
-            glbB64={glbB64}
-            viewMode={viewMode}
-            active={toolMode === "annotate" && pickKind === "face"}
-            hoveredFace={hovered?.kind === "face" ? hovered.index : null}
-            pinnedFace={pending?.kind === "face" ? pending.index : null}
-          />
-          <EdgesGroup
-            topology={topology}
-            viewMode={viewMode}
-            active={toolMode === "annotate" && pickKind === "edge"}
-            hoveredEdge={hovered?.kind === "edge" ? hovered.index : null}
-            pinnedEdge={pending?.kind === "edge" ? pending.index : null}
-          />
-          <VerticesGroup
-            topology={topology}
-            active={toolMode === "annotate" && pickKind === "vertex"}
-            hoveredVertex={hovered?.kind === "vertex" ? hovered.index : null}
-            pinnedVertex={pending?.kind === "vertex" ? pending.index : null}
-          />
+          {visible.map((v, i) => {
+            const isActive = v.name === activeName;
+            const color = colorForIndex(i);
+            return (
+              <group key={v.name}>
+                <FacesGroup
+                  glbB64={v.geometry.glbB64}
+                  viewMode={viewMode}
+                  bodyColor={color}
+                  active={isActive && toolMode === "annotate" && pickKind === "face"}
+                  hoveredFace={isActive && hovered?.kind === "face" ? hovered.index : null}
+                  pinnedFace={isActive && pending?.kind === "face" ? pending.index : null}
+                />
+                <EdgesGroup
+                  topology={v.geometry.topology}
+                  viewMode={viewMode}
+                  wireColor={color}
+                  active={isActive && toolMode === "annotate" && pickKind === "edge"}
+                  hoveredEdge={isActive && hovered?.kind === "edge" ? hovered.index : null}
+                  pinnedEdge={isActive && pending?.kind === "edge" ? pending.index : null}
+                />
+                {isActive && (
+                  <VerticesGroup
+                    topology={v.geometry.topology}
+                    active={toolMode === "annotate" && pickKind === "vertex"}
+                    hoveredVertex={hovered?.kind === "vertex" ? hovered.index : null}
+                    pinnedVertex={pending?.kind === "vertex" ? pending.index : null}
+                  />
+                )}
+              </group>
+            );
+          })}
         </group>
 
         {pending && (

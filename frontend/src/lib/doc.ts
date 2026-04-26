@@ -18,6 +18,7 @@ export type Commit = {
 export type ObjectMeta = {
   name: string;
   modified: number;
+  visible: boolean;
 };
 
 export type DocSummary = {

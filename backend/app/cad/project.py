@@ -266,7 +266,28 @@ class Project:
             mtime = src.stat().st_mtime
         except OSError:
             mtime = 0.0
-        return {"name": name, "modified": mtime}
+        return {
+            "name": name,
+            "modified": mtime,
+            "visible": self.is_object_visible(name),
+        }
+
+    def is_object_visible(self, name: str) -> bool:
+        vis = self._read_state().get("visibility") or {}
+        # Default visible — only flip if user explicitly hid it.
+        return vis.get(name, True)
+
+    def set_object_visible(self, name: str, visible: bool) -> None:
+        if not self.object_exists(name):
+            raise FileNotFoundError(f"object '{name}' does not exist")
+        state = self._read_state()
+        vis = dict(state.get("visibility") or {})
+        if visible:
+            vis.pop(name, None)  # default is visible; no need to store
+        else:
+            vis[name] = False
+        state["visibility"] = vis
+        self._write_state(state)
 
     def object_exists(self, name: str) -> bool:
         return self.object_source_path(name, _check=False).exists()
@@ -359,6 +380,13 @@ class Project:
         old_params = self.object_params_path(old)
         if old_params.exists():
             shutil.move(str(old_params), str(self.object_params_path(safe)))
+        # Carry visibility forward under the new name.
+        state = self._read_state()
+        vis = dict(state.get("visibility") or {})
+        if old in vis:
+            vis[safe] = vis.pop(old)
+            state["visibility"] = vis
+            self._write_state(state)
         if self.active_object() == old:
             self.set_active_object(safe)
         return safe
@@ -376,6 +404,13 @@ class Project:
         params = self.object_params_path(name)
         if params.exists():
             params.unlink()
+        # Drop any visibility entry for the deleted object.
+        state = self._read_state()
+        vis = dict(state.get("visibility") or {})
+        if name in vis:
+            vis.pop(name)
+            state["visibility"] = vis
+            self._write_state(state)
         if self.active_object() == name:
             remaining = [o for o in objs if o != name]
             self.set_active_object(remaining[0])

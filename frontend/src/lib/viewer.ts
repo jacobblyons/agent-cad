@@ -27,15 +27,29 @@ export type Topology = {
   vertices: VertexMeta[];
 };
 
-export type ViewerCtx = {
+export type ObjectGeometry = {
   glbB64: string | null;
   topology: Topology | null;
   errorMsg: string | null;
 };
 
+export type VisibleObject = {
+  name: string;
+  geometry: ObjectGeometry;
+};
+
+export type ViewerCtx = {
+  // Each visible object's geometry, in display order.
+  visible: VisibleObject[];
+  // The active object's name — picking, pinning, and the error banner are scoped to it.
+  activeName: string | null;
+  // Active object's error, if any (surfaced as the banner).
+  errorMsg: string | null;
+};
+
 export const ViewerContext = createContext<ViewerCtx>({
-  glbB64: null,
-  topology: null,
+  visible: [],
+  activeName: null,
   errorMsg: null,
 });
 

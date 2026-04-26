@@ -9,14 +9,14 @@
 import { createContext, useContext } from "react";
 import type { Turn } from "./chat";
 import type { DocSummary } from "./doc";
-import type { Topology } from "./viewer";
+import type { ObjectGeometry } from "./viewer";
 
 export type TabState = {
   doc: DocSummary;
   turns: Turn[];
-  glbB64: string | null;
-  topology: Topology | null;
-  errorMsg: string | null;
+  // Per-object geometry, keyed by object name. Slots persist across visibility
+  // toggles so hiding+showing doesn't force a re-render server-side.
+  geometry: Record<string, ObjectGeometry>;
 };
 
 export type TabsCtx = {

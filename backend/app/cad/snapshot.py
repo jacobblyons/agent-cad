@@ -137,7 +137,6 @@ def _apply_view(renderer: vtk.vtkRenderer, bbox_min, bbox_max,
     renderer.ResetCamera(bbox_min[0], bbox_max[0],
                          bbox_min[1], bbox_max[1],
                          bbox_min[2], bbox_max[2])
-    cam.Zoom(1.4)
     renderer.ResetCameraClippingRange()
 
 
