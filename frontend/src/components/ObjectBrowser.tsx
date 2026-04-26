@@ -1,18 +1,21 @@
 import { useState } from "react";
-import { Box, Eye, EyeOff, Plus, Trash2, Pencil, Check, X } from "lucide-react";
+import { Box, Eye, EyeOff, ListChecks, Plus, Trash2, Pencil, Check, X } from "lucide-react";
 import { call } from "@/lib/pywebview";
 import { useDoc } from "@/lib/doc";
 import { useChat } from "@/lib/chat";
 import { cn } from "@/lib/utils";
+import { RequirementsDialog } from "./RequirementsDialog";
 
 export function ObjectBrowser() {
   const { doc } = useDoc();
   const { isAgentRunning } = useChat();
   const [creating, setCreating] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [reqsFor, setReqsFor] = useState<string | null>(null);
 
   if (!doc) return null;
   const objects = doc.objects ?? [];
+  const reqsObject = reqsFor ? objects.find((o) => o.name === reqsFor) ?? null : null;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -47,9 +50,11 @@ export function ObjectBrowser() {
                 name={o.name}
                 active={o.name === doc.active_object}
                 visible={o.visible}
+                requirementCount={(o.requirements ?? []).length}
                 canDelete={objects.length > 1}
                 disabled={isAgentRunning}
                 onRename={() => setRenaming(o.name)}
+                onOpenRequirements={() => setReqsFor(o.name)}
               />
             ),
           )}
@@ -62,6 +67,14 @@ export function ObjectBrowser() {
           )}
         </div>
       </div>
+
+      <RequirementsDialog
+        open={reqsObject !== null}
+        onClose={() => setReqsFor(null)}
+        docId={doc.id}
+        objectName={reqsObject?.name ?? ""}
+        initial={reqsObject?.requirements ?? []}
+      />
     </div>
   );
 }
@@ -71,17 +84,21 @@ function ObjectRow({
   name,
   active,
   visible,
+  requirementCount,
   canDelete,
   disabled,
   onRename,
+  onOpenRequirements,
 }: {
   docId: string;
   name: string;
   active: boolean;
   visible: boolean;
+  requirementCount: number;
   canDelete: boolean;
   disabled: boolean;
   onRename: () => void;
+  onOpenRequirements: () => void;
 }) {
   const setActive = async () => {
     if (active || disabled) return;
@@ -131,6 +148,28 @@ function ObjectRow({
       <span className={cn("flex-1 truncate font-mono", !visible && "opacity-50")}>
         {name}
       </span>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpenRequirements();
+        }}
+        title={
+          requirementCount > 0
+            ? `${requirementCount} requirement${requirementCount === 1 ? "" : "s"}`
+            : "Add requirements"
+        }
+        className={cn(
+          "flex items-center gap-0.5 rounded p-0.5 transition",
+          requirementCount > 0
+            ? "text-[var(--color-accent)] hover:bg-[var(--color-hover)]"
+            : "opacity-0 group-hover:opacity-60 hover:bg-[var(--color-hover)] hover:!opacity-100",
+        )}
+      >
+        <ListChecks size={11} />
+        {requirementCount > 0 && (
+          <span className="text-[10px] tabular-nums">{requirementCount}</span>
+        )}
+      </button>
       <button
         onClick={(e) => {
           e.stopPropagation();

@@ -6,9 +6,11 @@ import { SettingsDialog } from "@/components/SettingsDialog";
 import { Welcome } from "@/components/Welcome";
 import {
   ChatContext,
+  formatAttachmentsForPrompt,
   formatPinForPrompt,
   formatPinForUser,
   type ChatBlock,
+  type ChatImage,
   type ChatToolBlock,
   type PinInfo,
   type Turn,
@@ -61,7 +63,7 @@ export default function App() {
       // De-dupe: opening the same project twice just focuses the existing tab.
       const existing = cur.find((t) => t.doc.id === d.id);
       if (existing) return cur.map((t) => (t.doc.id === d.id ? { ...t, doc: d } : t));
-      return [...cur, { doc: d, turns: [], geometry: {} }];
+      return [...cur, { doc: d, turns: [], geometry: {}, pendingAttachments: [] }];
     });
     setActiveId(d.id);
   }, []);
@@ -133,17 +135,62 @@ export default function App() {
   }, [doc]);
 
   const send = useCallback(
-    async (text: string, pin?: PinInfo) => {
-      if (!doc || !text.trim()) return;
+    async (text: string, opts?: { pin?: PinInfo; images?: ChatImage[] }) => {
+      if (!doc) return;
+      const pin = opts?.pin;
+      const tab = tabs.find((t) => t.doc.id === doc.id);
+      // Caller-supplied images take precedence; otherwise drain the per-tab
+      // queue of pending attachments.
+      const images = opts?.images ?? tab?.pendingAttachments ?? [];
+      if (!text.trim() && images.length === 0) return;
       const display = pin ? formatPinForUser(pin, text) : text;
-      const prompt = pin ? formatPinForPrompt(pin, text) : text;
-      const turn: Turn = { id: `u_${Date.now()}`, role: "user", text: display };
+      let prompt = pin ? formatPinForPrompt(pin, text) : text;
+      if (images.length > 0) prompt = formatAttachmentsForPrompt(images, prompt);
+      const turn: Turn = {
+        id: `u_${Date.now()}`,
+        role: "user",
+        text: display,
+        images: images.length > 0 ? images : undefined,
+      };
       setTabs((cur) =>
         cur.map((t) =>
-          t.doc.id === doc.id ? { ...t, turns: [...t.turns, turn] } : t,
+          t.doc.id === doc.id
+            ? { ...t, turns: [...t.turns, turn], pendingAttachments: [] }
+            : t,
         ),
       );
-      await call("chat_send", doc.id, prompt, []);
+      await call("chat_send", doc.id, prompt, images);
+    },
+    [doc, tabs],
+  );
+
+  const addAttachment = useCallback(
+    (img: ChatImage) => {
+      if (!doc) return;
+      setTabs((cur) =>
+        cur.map((t) =>
+          t.doc.id === doc.id
+            ? { ...t, pendingAttachments: [...t.pendingAttachments, img] }
+            : t,
+        ),
+      );
+    },
+    [doc],
+  );
+
+  const removeAttachment = useCallback(
+    (index: number) => {
+      if (!doc) return;
+      setTabs((cur) =>
+        cur.map((t) =>
+          t.doc.id === doc.id
+            ? {
+                ...t,
+                pendingAttachments: t.pendingAttachments.filter((_, i) => i !== index),
+              }
+            : t,
+        ),
+      );
     },
     [doc],
   );
@@ -256,8 +303,15 @@ export default function App() {
   );
 
   const chatCtx = useMemo(
-    () => ({ turns: activeTab?.turns ?? [], isAgentRunning, send }),
-    [activeTab, isAgentRunning, send],
+    () => ({
+      turns: activeTab?.turns ?? [],
+      isAgentRunning,
+      send,
+      pendingAttachments: activeTab?.pendingAttachments ?? [],
+      addAttachment,
+      removeAttachment,
+    }),
+    [activeTab, isAgentRunning, send, addAttachment, removeAttachment],
   );
 
   const viewerCtx = useMemo(() => {

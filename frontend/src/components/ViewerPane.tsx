@@ -1,5 +1,5 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { Canvas, ThreeEvent, useThree } from "@react-three/fiber";
+import { Canvas, ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import {
   ContactShadows,
   Environment,
@@ -14,6 +14,7 @@ import * as THREE from "three";
 import {
   Box,
   Boxes,
+  Camera,
   CircleDot,
   MessageSquarePlus,
   Spline,
@@ -25,6 +26,7 @@ import { base64ToArrayBuffer, useDoc } from "@/lib/doc";
 import { useChat, type EntityKind } from "@/lib/chat";
 import { useViewer, type EdgeMeta, type Topology, type VertexMeta } from "@/lib/viewer";
 import { cn } from "@/lib/utils";
+import { DrawingDialog } from "./DrawingDialog";
 
 type ViewMode = "shaded" | "unshaded" | "wireframe";
 type ToolMode = "orbit" | "annotate";
@@ -413,6 +415,7 @@ function ViewerToolbar({
   onTool,
   pickKind,
   onPickKind,
+  onSnapshot,
 }: {
   view: ViewMode;
   onView: (m: ViewMode) => void;
@@ -420,6 +423,7 @@ function ViewerToolbar({
   onTool: (m: ToolMode) => void;
   pickKind: EntityKind;
   onPickKind: (k: EntityKind) => void;
+  onSnapshot: () => void;
 }) {
   return (
     <div className="absolute right-3 top-3 flex flex-col items-end gap-1.5">
@@ -453,6 +457,14 @@ function ViewerToolbar({
         >
           <MessageSquarePlus size={12} />
           <span>Point</span>
+        </button>
+        <button
+          onClick={onSnapshot}
+          title="Snapshot the current view to annotate and attach"
+          className="flex h-7 items-center gap-1.5 rounded-sm px-2 text-xs text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-text)]"
+        >
+          <Camera size={12} />
+          <span>Snapshot</span>
         </button>
       </div>
       {tool === "annotate" && (
@@ -490,12 +502,44 @@ function CursorTracker({ enabled }: { enabled: boolean }) {
   return null;
 }
 
+type CameraSnap = {
+  /** Camera position in CADQuery coords (Z up), millimetres. */
+  position: [number, number, number];
+  /** OrbitControls target in CADQuery coords (Z up), millimetres. */
+  target: [number, number, number];
+  /** Camera up vector in CADQuery coords. */
+  up: [number, number, number];
+};
+
+/** Mirrors live camera + orbit-target state into a ref readable from outside Canvas. */
+function CameraTracker({ outRef }: { outRef: React.MutableRefObject<CameraSnap | null> }) {
+  const { camera, controls } = useThree();
+  useFrame(() => {
+    const t = (controls as unknown as { target?: THREE.Vector3 } | null)?.target;
+    outRef.current = {
+      position: threeToCq(camera.position),
+      target: t ? threeToCq(t) : [0, 0, 0],
+      up: threeToCq(camera.up),
+    };
+  });
+  return null;
+}
+
+function fmtArr(v: [number, number, number]): string {
+  return `[${v[0].toFixed(2)}, ${v[1].toFixed(2)}, ${v[2].toFixed(2)}]`;
+}
+
 // --- Main pane -----------------------------------------------------------
 
 export function ViewerPane() {
   const { doc } = useDoc();
-  const { send } = useChat();
+  const { send, addAttachment } = useChat();
   const { visible, activeName, errorMsg } = useViewer();
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const cameraRef = useRef<CameraSnap | null>(null);
+  const [snapshot, setSnapshot] = useState<
+    { data: string; description: string } | null
+  >(null);
 
   const [viewMode, setViewMode] = useState<ViewMode>(
     () => (localStorage.getItem("agentcad:viewMode") as ViewMode) || "shaded",
@@ -586,17 +630,34 @@ export function ViewerPane() {
       return;
     }
     await send(t, {
-      entity_kind: pending.kind,
-      entity_index: pending.index,
-      entity_type: pending.type,
-      pin_world: pending.point,
+      pin: {
+        entity_kind: pending.kind,
+        entity_index: pending.index,
+        entity_type: pending.type,
+        pin_world: pending.point,
+      },
     });
     setPending(null);
     setToolMode("orbit");
   };
 
+  const captureSnapshot = () => {
+    // Canvas keeps its last frame thanks to preserveDrawingBuffer; toDataURL
+    // works without forcing a re-render.
+    const c = wrapperRef.current?.querySelector("canvas");
+    if (!c) return;
+    const cam = cameraRef.current;
+    const description = cam
+      ? `Camera (CADQuery coords, +Z up, mm): ` +
+        `position=${fmtArr(cam.position)}, target=${fmtArr(cam.target)}, up=${fmtArr(cam.up)}. ` +
+        `Pass these directly as the snapshot tool's "camera" argument to render ` +
+        `from the same angle. View mode: ${viewMode}.`
+      : `View mode: ${viewMode}.`;
+    setSnapshot({ data: c.toDataURL("image/png"), description });
+  };
+
   return (
-    <div className="absolute inset-0">
+    <div ref={wrapperRef} className="absolute inset-0">
       <Canvas
         shadows
         dpr={[1, 2]}
@@ -613,6 +674,7 @@ export function ViewerPane() {
         }}
       >
         <CursorTracker enabled={toolMode === "annotate"} />
+        <CameraTracker outRef={cameraRef} />
         <color attach="background" args={["#1e1e1e"]} />
 
         <ambientLight intensity={viewMode === "shaded" ? 0.18 : 0.0} />
@@ -726,6 +788,20 @@ export function ViewerPane() {
         onTool={setToolMode}
         pickKind={pickKind}
         onPickKind={setPickKind}
+        onSnapshot={captureSnapshot}
+      />
+
+      <DrawingDialog
+        open={snapshot !== null}
+        onClose={() => setSnapshot(null)}
+        onAttach={(img) =>
+          addAttachment({
+            ...img,
+            source: "snapshot",
+            description: snapshot?.description,
+          })
+        }
+        background={snapshot?.data ?? null}
       />
 
       {toolMode === "annotate" && !pending && (

@@ -248,6 +248,18 @@ class JsApi:
         bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
         return {"ok": True, "project": proj.to_json()}
 
+    def object_set_requirements(self, project_id: str, name: str,
+                                requirements: list[str]) -> dict:
+        proj = self._projects.get(project_id)
+        if proj is None:
+            return {"ok": False, "error": "not_found"}
+        try:
+            proj.set_requirements(name, list(requirements or []))
+        except FileNotFoundError as e:
+            return {"ok": False, "error": str(e)}
+        bus.emit("project_state", {"doc_id": proj.id, "state": proj.to_json()})
+        return {"ok": True, "project": proj.to_json()}
+
     # --- timeline ------------------------------------------------------
 
     def timeline_checkout(self, project_id: str, ref: str) -> dict:

@@ -19,6 +19,8 @@ export type ObjectMeta = {
   name: string;
   modified: number;
   visible: boolean;
+  /** User-defined ordered list of hard constraints the agent must satisfy. */
+  requirements: string[];
 };
 
 export type DocSummary = {

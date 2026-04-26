@@ -19,7 +19,19 @@ export type PinInfo = {
   pin_world: [number, number, number];
 };
 
-export type ChatImage = { data: string; mimeType: string };
+export type ChatImage = {
+  data: string;
+  mimeType: string;
+  /**
+   * Where the image came from. The agent needs this so it doesn't mistake a
+   * user's drawing for a render of the model.
+   *  - "drawing" — freehand sketch on a blank canvas
+   *  - "snapshot" — viewer screenshot the user drew on top of
+   */
+  source?: "drawing" | "snapshot";
+  /** Free-form context (e.g. camera position) appended to the prompt preamble. */
+  description?: string;
+};
 
 export type ChatTextBlock = { kind: "text"; text: string };
 export type ChatToolBlock = {
@@ -34,7 +46,7 @@ export type ChatToolBlock = {
 export type ChatBlock = ChatTextBlock | ChatToolBlock;
 
 export type Turn =
-  | { id: string; role: "user"; text: string }
+  | { id: string; role: "user"; text: string; images?: ChatImage[] }
   | {
       id: string;
       role: "assistant";
@@ -46,13 +58,20 @@ export type Turn =
 export type ChatCtx = {
   turns: Turn[];
   isAgentRunning: boolean;
-  send: (text: string, pin?: PinInfo) => Promise<void>;
+  send: (text: string, opts?: { pin?: PinInfo; images?: ChatImage[] }) => Promise<void>;
+  /** Queue of attachments staged for the next send. */
+  pendingAttachments: ChatImage[];
+  addAttachment: (img: ChatImage) => void;
+  removeAttachment: (index: number) => void;
 };
 
 export const ChatContext = createContext<ChatCtx>({
   turns: [],
   isAgentRunning: false,
   send: async () => {},
+  pendingAttachments: [],
+  addAttachment: () => {},
+  removeAttachment: () => {},
 });
 
 export const useChat = () => useContext(ChatContext);
@@ -60,6 +79,40 @@ export const useChat = () => useContext(ChatContext);
 export function formatPinForUser(pin: PinInfo, text: string): string {
   const idx = pin.entity_index ?? "?";
   return `📍 ${pin.entity_kind} ${idx} — ${text}`;
+}
+
+/**
+ * Wrap the prompt with a preamble that names each attached image and where it
+ * came from. The agent needs this because:
+ *   1. annotated snapshots look like the model but contain user pen marks the
+ *      model doesn't actually have, and
+ *   2. freehand drawings have no scene context at all — without a label the
+ *      agent can read them as schematic-of-the-model rather than user input.
+ *
+ * Image order in the preamble must match the order images are attached to
+ * the API message — runner.py emits text first, then images in array order.
+ */
+export function formatAttachmentsForPrompt(images: ChatImage[], text: string): string {
+  if (images.length === 0) return text;
+  const lines = images.map((img, i) => {
+    const n = i + 1;
+    if (img.source === "snapshot") {
+      const ctx = img.description ? ` ${img.description}` : "";
+      return (
+        `Image ${n}: an annotated screenshot of the current 3D viewer. The user ` +
+        `drew on top of it to point at features — those pen marks are *not* part ` +
+        `of the model.${ctx}`
+      );
+    }
+    if (img.source === "drawing") {
+      return (
+        `Image ${n}: a freehand sketch the user drew on a blank canvas to ` +
+        `illustrate intent. Treat it as a hand-drawn hint, not a render of the model.`
+      );
+    }
+    return `Image ${n}: a user-supplied image.`;
+  });
+  return `[Attached images:\n${lines.join("\n")}]\n\n${text}`;
 }
 
 export function formatPinForPrompt(pin: PinInfo, text: string): string {

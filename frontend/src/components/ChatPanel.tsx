@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Send, Wrench } from "lucide-react";
-import { useChat, type ChatBlock, type ChatToolBlock, type Turn } from "@/lib/chat";
+import { Loader2, Pencil, Send, Wrench, X } from "lucide-react";
+import { DrawingDialog } from "./DrawingDialog";
+import {
+  useChat,
+  type ChatBlock,
+  type ChatToolBlock,
+  type Turn,
+} from "@/lib/chat";
 import { useDoc } from "@/lib/doc";
 import { cn } from "@/lib/utils";
 
@@ -23,8 +29,10 @@ const TEXTAREA_MAX_PX = 240;
 
 export function ChatPanel() {
   const { doc } = useDoc();
-  const { turns, isAgentRunning, send } = useChat();
+  const { turns, isAgentRunning, send, pendingAttachments, addAttachment, removeAttachment } =
+    useChat();
   const [input, setInput] = useState("");
+  const [showDraw, setShowDraw] = useState(false);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -43,10 +51,14 @@ export function ChatPanel() {
     el.style.height = `${Math.min(el.scrollHeight, TEXTAREA_MAX_PX)}px`;
   }, [input]);
 
+  const canSubmit =
+    !!doc && !isAgentRunning && (input.trim().length > 0 || pendingAttachments.length > 0);
+
   const submit = async () => {
+    if (!canSubmit) return;
     const text = input.trim();
-    if (!text || !doc || isAgentRunning) return;
     setInput("");
+    // App.send drains pendingAttachments from the active tab.
     await send(text);
   };
 
@@ -63,9 +75,21 @@ export function ChatPanel() {
           t.role === "user" ? (
             <div
               key={t.id}
-              className="ml-auto max-w-[90%] rounded-md bg-[var(--color-selection)] px-3 py-2 text-sm leading-relaxed text-[var(--color-text)]"
+              className="ml-auto max-w-[90%] space-y-1.5 rounded-md bg-[var(--color-selection)] px-3 py-2 text-sm leading-relaxed text-[var(--color-text)]"
             >
-              {t.text}
+              {t.text && <div>{t.text}</div>}
+              {t.images && t.images.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {t.images.map((img, i) => (
+                    <img
+                      key={i}
+                      src={`data:${img.mimeType};base64,${img.data}`}
+                      alt="sketch"
+                      className="max-h-40 rounded-sm border border-[var(--color-border)] bg-white object-contain"
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           ) : (
             <AssistantTurn key={t.id} turn={t} />
@@ -79,31 +103,67 @@ export function ChatPanel() {
         )}
       </div>
       <div className="border-t border-[var(--color-border)] p-3">
-        <div className="flex items-end gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] px-3 py-2 focus-within:border-[var(--color-focus)]">
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                submit();
-              }
-            }}
-            placeholder="Describe a part, or paste an image…"
-            rows={1}
-            className="min-h-[24px] flex-1 resize-none overflow-y-auto bg-transparent text-sm leading-relaxed outline-none placeholder:text-[var(--color-muted)]"
-          />
-          <button
-            onClick={submit}
-            disabled={!input.trim() || !doc || isAgentRunning}
-            className="flex h-8 w-8 items-center justify-center rounded-sm bg-[var(--color-accent)] text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-40"
-            aria-label="send"
-          >
-            <Send size={14} />
-          </button>
+        <div className="flex flex-col gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)] px-3 py-2 focus-within:border-[var(--color-focus)]">
+          {pendingAttachments.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {pendingAttachments.map((img, i) => (
+                <div key={i} className="relative">
+                  <img
+                    src={`data:${img.mimeType};base64,${img.data}`}
+                    alt="attached sketch"
+                    className="h-14 w-14 rounded-sm border border-[var(--color-border)] bg-white object-contain"
+                  />
+                  <button
+                    onClick={() => removeAttachment(i)}
+                    aria-label="remove attachment"
+                    className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full border border-[var(--color-border)] bg-[var(--color-panel)] text-[var(--color-muted)] hover:text-[var(--color-text)]"
+                  >
+                    <X size={10} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="flex items-end gap-2">
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              placeholder="Describe a part, sketch a hint, or paste an image…"
+              rows={1}
+              className="min-h-[24px] flex-1 resize-none overflow-y-auto bg-transparent text-sm leading-relaxed outline-none placeholder:text-[var(--color-muted)]"
+            />
+            <button
+              onClick={() => setShowDraw(true)}
+              disabled={!doc}
+              title="Add a sketch"
+              aria-label="add sketch"
+              className="flex h-8 w-8 items-center justify-center rounded-sm border border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-hover)] disabled:opacity-40"
+            >
+              <Pencil size={14} />
+            </button>
+            <button
+              onClick={submit}
+              disabled={!canSubmit}
+              className="flex h-8 w-8 items-center justify-center rounded-sm bg-[var(--color-accent)] text-[var(--color-accent-fg)] hover:bg-[var(--color-accent-hover)] disabled:opacity-40"
+              aria-label="send"
+            >
+              <Send size={14} />
+            </button>
+          </div>
         </div>
       </div>
+      <DrawingDialog
+        open={showDraw}
+        onClose={() => setShowDraw(false)}
+        onAttach={(img) => addAttachment({ ...img, source: "drawing" })}
+      />
     </div>
   );
 }

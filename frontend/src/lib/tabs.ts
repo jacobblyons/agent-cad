@@ -7,7 +7,7 @@
  * so individual panels don't need to know about tabs at all.
  */
 import { createContext, useContext } from "react";
-import type { Turn } from "./chat";
+import type { ChatImage, Turn } from "./chat";
 import type { DocSummary } from "./doc";
 import type { ObjectGeometry } from "./viewer";
 
@@ -17,6 +17,9 @@ export type TabState = {
   // Per-object geometry, keyed by object name. Slots persist across visibility
   // toggles so hiding+showing doesn't force a re-render server-side.
   geometry: Record<string, ObjectGeometry>;
+  // Attachments queued for the next chat send (sketches, viewer snapshots).
+  // Cleared after a successful send.
+  pendingAttachments: ChatImage[];
 };
 
 export type TabsCtx = {

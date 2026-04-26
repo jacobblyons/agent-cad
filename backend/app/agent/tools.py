@@ -59,6 +59,34 @@ _REF_PATTERN = re.compile(
 )
 
 
+def _vec3(x: Any, name: str) -> list[float] | None:
+    """Coerce a 3-element iterable of numbers; returns None if missing."""
+    if x is None:
+        return None
+    if not isinstance(x, (list, tuple)) or len(x) != 3:
+        raise ValueError(f"{name!r} must be a length-3 list of numbers, got {x!r}")
+    try:
+        return [float(x[0]), float(x[1]), float(x[2])]
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{name!r} must be numeric, got {x!r}") from e
+
+
+def _build_view_arg(view_name: str | None, camera: Any) -> dict:
+    """Pick between a preset preset (string) and an explicit camera pose.
+
+    Explicit `camera` wins when supplied so the agent can reproduce the same
+    angle the user saw when they took an annotated screenshot.
+    """
+    if isinstance(camera, dict) and (camera.get("position") or camera.get("target")):
+        position = _vec3(camera.get("position"), "camera.position")
+        target = _vec3(camera.get("target"), "camera.target")
+        up = _vec3(camera.get("up"), "camera.up") or [0.0, 0.0, 1.0]
+        if not position or not target:
+            raise ValueError("camera requires both 'position' and 'target' (length-3 lists)")
+        return {"position": position, "target": target, "up": up}
+    return {"preset": (view_name or "iso").strip().lower()}
+
+
 class CadToolset:
     """Per-chat-turn handle the tools share.
 
@@ -178,17 +206,25 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
         "snapshot",
         "Render a PNG of the active object from the chosen viewpoint and return it as an image you can look at. "
         "view: 'iso' | 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom'. "
+        "OR pass an explicit camera pose to match a specific angle: "
+        "camera={'position':[x,y,z], 'target':[x,y,z], 'up':[x,y,z]} in CADQuery coords (mm, +Z up). "
+        "When the user attaches an annotated screenshot, ALWAYS use the camera "
+        "pose listed in its description so your verification render is from the "
+        "same angle — preset views routinely hide the feature the user circled. "
         "Use this liberally to verify your edits look right — you are multimodal and can see the result.",
-        {"view": str},
+        {"view": str, "camera": dict},
     )
     async def snapshot(args):
-        view_name = (args.get("view") or "iso").strip().lower()
         proj = toolset.project
         active = proj.active_object()
+        try:
+            view_dict = _build_view_arg(args.get("view"), args.get("camera"))
+        except ValueError as e:
+            return _err(str(e))
         result = snapshot_script(
             proj.object_source_path(active),
             proj.object_params_path(active),
-            {"preset": view_name},
+            view_dict,
             cwd=proj.path,
             width=900, height=700, timeout=30.0,
         )
@@ -197,9 +233,12 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             if result.stderr:
                 msg += "\n\nstderr:\n" + result.stderr.strip()[-1500:]
             return _err(msg)
+        label = view_dict.get("preset") or (
+            f"camera pos={view_dict['position']} target={view_dict['target']}"
+        )
         return {
             "content": [
-                {"type": "text", "text": f"snapshot of '{active}' from view '{view_name}':"},
+                {"type": "text", "text": f"snapshot of '{active}' from {label}:"},
                 _image_block(result.png_bytes or b""),
             ]
         }
@@ -452,8 +491,8 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
     @tool(
         "section_snapshot",
         "Render a cross-section of the active object: the part is cut by an axis-aligned plane and the half you keep is shown so you can see internal features (pockets, holes, walls, ribs). "
-        "axis: 'X' | 'Y' | 'Z' (the plane normal). offset: signed distance from origin along that axis. side: 'above' (default — keeps material on the lower side) or 'below'. view: 'iso' | 'front' | 'top' | etc.",
-        {"axis": str, "offset": float, "side": str, "view": str},
+        "axis: 'X' | 'Y' | 'Z' (the plane normal). offset: signed distance from origin along that axis. side: 'above' (default — keeps material on the lower side) or 'below'. view: 'iso' | 'front' | 'top' | etc., or pass camera={'position','target','up'} for an explicit pose.",
+        {"axis": str, "offset": float, "side": str, "view": str, "camera": dict},
     )
     async def section_snapshot(args):
         proj = toolset.project
@@ -461,7 +500,10 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
         axis = (args.get("axis") or "Z").upper()
         offset = float(args.get("offset", 0.0))
         side = (args.get("side") or "above").lower()
-        view = (args.get("view") or "iso").strip().lower()
+        try:
+            view_dict = _build_view_arg(args.get("view"), args.get("camera"))
+        except ValueError as e:
+            return _err(str(e))
         spec = {
             "items": [{
                 "name": active,
@@ -469,7 +511,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
                 "params": str(proj.object_params_path(active)),
             }],
             "post": {"kind": "section", "axis": axis, "offset": offset, "side": side},
-            "view": {"preset": view},
+            "view": view_dict,
             "width": 900, "height": 700,
         }
         result = scene_script(spec, cwd=proj.path)
@@ -478,24 +520,28 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             if result.stderr:
                 msg += "\n\nstderr:\n" + result.stderr.strip()[-1500:]
             return _err(msg)
+        label = view_dict.get("preset") or "custom camera"
         text = (
             f"section of '{active}' along {axis} = {offset}mm "
-            f"(removed {side}), view '{view}':"
+            f"(removed {side}), view '{label}':"
         )
         return {"content": [{"type": "text", "text": text},
                             _image_block(result.png_bytes or b"")]}
 
     @tool(
         "scene_snapshot",
-        "Render two or more objects together in one frame, each in a different colour. Use this to verify how parts sit next to each other (lid-on-case, screw-in-hole, etc.). Pass object names from this project. view: 'iso' | 'front' | 'top' | etc.",
-        {"objects": list, "view": str},
+        "Render two or more objects together in one frame, each in a different colour. Use this to verify how parts sit next to each other (lid-on-case, screw-in-hole, etc.). Pass object names from this project. view: 'iso' | 'front' | 'top' | etc., or pass camera={'position','target','up'} for an explicit pose (matches a user screenshot).",
+        {"objects": list, "view": str, "camera": dict},
     )
     async def scene_snapshot(args):
         proj = toolset.project
         names = args.get("objects") or []
         if not isinstance(names, list) or not names:
             return _err("'objects' must be a non-empty list of object names")
-        view = (args.get("view") or "iso").strip().lower()
+        try:
+            view_dict = _build_view_arg(args.get("view"), args.get("camera"))
+        except ValueError as e:
+            return _err(str(e))
         items = []
         for n in names:
             if not proj.object_exists(n):
@@ -508,7 +554,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
         spec = {
             "items": items,
             "post": None,
-            "view": {"preset": view},
+            "view": view_dict,
             "width": 900, "height": 700,
         }
         result = scene_script(spec, cwd=proj.path)
@@ -517,22 +563,26 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             if result.stderr:
                 msg += "\n\nstderr:\n" + result.stderr.strip()[-1500:]
             return _err(msg)
+        label = view_dict.get("preset") or "custom camera"
         return {"content": [
-            {"type": "text", "text": f"scene of {names!r}, view '{view}':"},
+            {"type": "text", "text": f"scene of {names!r}, view '{label}':"},
             _image_block(result.png_bytes or b""),
         ]}
 
     @tool(
         "preview_boolean",
         "Compute and render the union / intersection / difference of two objects WITHOUT modifying any script. Use to check fit & clearance: an empty intersection means the parts don't overlap; a non-empty intersection shows exactly where they collide. "
-        "op: 'union' | 'intersection' | 'difference' (a minus b). view: 'iso' | 'front' | 'top' | etc.",
-        {"a": str, "b": str, "op": str, "view": str},
+        "op: 'union' | 'intersection' | 'difference' (a minus b). view: 'iso' | 'front' | 'top' | etc., or pass camera={'position','target','up'} for an explicit pose.",
+        {"a": str, "b": str, "op": str, "view": str, "camera": dict},
     )
     async def preview_boolean(args):
         proj = toolset.project
         a, b = args.get("a"), args.get("b")
         op = (args.get("op") or "union").lower()
-        view = (args.get("view") or "iso").strip().lower()
+        try:
+            view_dict = _build_view_arg(args.get("view"), args.get("camera"))
+        except ValueError as e:
+            return _err(str(e))
         if not a or not b:
             return _err("'a' and 'b' (object names) are required")
         for n in (a, b):
@@ -548,7 +598,7 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
                  "params": str(proj.object_params_path(b))},
             ],
             "post": {"kind": "boolean", "op": op, "a": a, "b": b},
-            "view": {"preset": view},
+            "view": view_dict,
             "width": 900, "height": 700,
         }
         result = scene_script(spec, cwd=proj.path)
@@ -557,9 +607,10 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
             if result.stderr:
                 msg += "\n\nstderr:\n" + result.stderr.strip()[-1500:]
             return _err(msg)
+        label = view_dict.get("preset") or "custom camera"
         text = (
             f"{op} of '{a}' and '{b}' (transient — neither script was modified), "
-            f"view '{view}':"
+            f"view '{label}':"
         )
         return {"content": [{"type": "text", "text": text},
                             _image_block(result.png_bytes or b"")]}

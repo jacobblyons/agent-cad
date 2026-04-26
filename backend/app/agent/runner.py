@@ -41,6 +41,7 @@ the viewer, Tweaks panel, and all CAD tools follow the active object.
 
 The active object right now is: **{active_object}**
 All objects in this project: {all_objects}
+{requirements_section}
 
 You drive the design by editing the active object's script with the
 standard Read/Edit/Write tools, then calling mcp__cad__run_model to
@@ -70,6 +71,13 @@ Conventions:
 - When you change geometry that you can't easily picture, call
   mcp__cad__snapshot with the relevant view ('iso','top','front','right',
   etc.) to actually see what you made. You ARE multimodal — use it.
+- When the user attaches an annotated viewer screenshot, the image's
+  description gives you the exact camera pose (position/target/up in
+  CADQuery coords). To verify a fix, call snapshot with that pose as the
+  `camera` argument — do NOT default to a preset preset like 'iso' or
+  'top', because the user circled what they did *because* presets weren't
+  showing it. Same goes for section_snapshot, scene_snapshot, and
+  preview_boolean — all four accept an explicit `camera`.
 - For internal features (pockets, holes, walls, ribs) the outside view
   hides what matters — use mcp__cad__section_snapshot to slice the part
   with an axis-aligned plane and look at the cross-section.
@@ -116,11 +124,41 @@ Available CADQuery tips:
 """
 
 
+def _build_requirements_section(project: Project) -> str:
+    """User-defined requirements per object, with an instruction to verify
+    after each change. Empty when no object has any requirements yet."""
+    objs = project.list_objects()
+    blocks: list[str] = []
+    for o in objs:
+        reqs = project.list_requirements(o["name"])
+        if not reqs:
+            continue
+        bullets = "\n".join(f"  {i + 1}. {r}" for i, r in enumerate(reqs))
+        blocks.append(f"- **{o['name']}**:\n{bullets}")
+    if not blocks:
+        return ""
+    body = "\n".join(blocks)
+    return (
+        "\nREQUIREMENTS (user-defined, ordered):\n"
+        f"{body}\n"
+        "\n"
+        "These are hard constraints the user expects each object to satisfy. "
+        "After every change you make to an object, verify that ALL of its "
+        "requirements still hold — use measure / mass_properties / "
+        "query_faces / query_edges / eval_expression / section_snapshot as "
+        "needed to check. If a change would violate a requirement, prefer to "
+        "find an alternative that satisfies it. If you genuinely cannot, "
+        "STOP, and tell the user which requirement is violated and why before "
+        "committing.\n"
+    )
+
+
 def _build_system_prompt(project: Project) -> str:
     objs = [o["name"] for o in project.list_objects()]
     return SYSTEM_PROMPT_TEMPLATE.format(
         active_object=project.active_object(),
         all_objects=", ".join(objs) if objs else "(none yet)",
+        requirements_section=_build_requirements_section(project),
     )
 
 
@@ -169,7 +207,15 @@ async def _run(project: Project, toolset: CadToolset, prompt: str,
 
     bus.emit("chat_event", {"doc_id": project.id, "msg_id": msg_id, "kind": "start"})
 
-    async for message in query(prompt=prompt, options=options):
+    # Multimodal prompts (text + attached images) require streaming-mode
+    # input — string prompts can't carry image content blocks.
+    query_prompt: Any
+    if attachments:
+        query_prompt = _stream_multimodal_prompt(prompt, attachments)
+    else:
+        query_prompt = prompt
+
+    async for message in query(prompt=query_prompt, options=options):
         # Tool USE blocks ride on AssistantMessage; tool RESULT blocks ride on
         # UserMessage (the SDK feeds tool output back as the next user turn,
         # mirroring Anthropic's API). We have to inspect both.
@@ -208,6 +254,33 @@ async def _run(project: Project, toolset: CadToolset, prompt: str,
                 "subtype": getattr(message, "subtype", None),
                 "is_error": getattr(message, "is_error", False),
             })
+
+
+async def _stream_multimodal_prompt(text: str, attachments: list[dict]):
+    """Yield a single user message with text + image content blocks.
+
+    The SDK's streaming-mode input expects Anthropic-shaped image blocks
+    (`{type:"image", source:{type:"base64", media_type, data}}`); the
+    frontend hands us MCP-shaped `{data, mimeType}` so we translate here.
+    """
+    content: list[dict] = []
+    if text:
+        content.append({"type": "text", "text": text})
+    for att in attachments:
+        data = att.get("data")
+        mime = att.get("mimeType") or att.get("media_type") or "image/png"
+        if not data:
+            continue
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": mime, "data": data},
+        })
+    yield {
+        "type": "user",
+        "message": {"role": "user", "content": content},
+        "parent_tool_use_id": None,
+        "session_id": "",
+    }
 
 
 def _safe(obj: Any) -> Any:

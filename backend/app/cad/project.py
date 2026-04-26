@@ -270,12 +270,32 @@ class Project:
             "name": name,
             "modified": mtime,
             "visible": self.is_object_visible(name),
+            "requirements": self.list_requirements(name),
         }
 
     def is_object_visible(self, name: str) -> bool:
         vis = self._read_state().get("visibility") or {}
         # Default visible — only flip if user explicitly hid it.
         return vis.get(name, True)
+
+    def list_requirements(self, name: str) -> list[str]:
+        """Ordered list of user-defined requirements for this object."""
+        reqs = self._read_state().get("requirements") or {}
+        items = reqs.get(name) or []
+        return [str(r) for r in items if str(r).strip()]
+
+    def set_requirements(self, name: str, requirements: list[str]) -> None:
+        if not self.object_exists(name):
+            raise FileNotFoundError(f"object '{name}' does not exist")
+        cleaned = [str(r).strip() for r in requirements if str(r).strip()]
+        state = self._read_state()
+        reqs = dict(state.get("requirements") or {})
+        if cleaned:
+            reqs[name] = cleaned
+        else:
+            reqs.pop(name, None)
+        state["requirements"] = reqs
+        self._write_state(state)
 
     def set_object_visible(self, name: str, visible: bool) -> None:
         if not self.object_exists(name):
@@ -380,12 +400,20 @@ class Project:
         old_params = self.object_params_path(old)
         if old_params.exists():
             shutil.move(str(old_params), str(self.object_params_path(safe)))
-        # Carry visibility forward under the new name.
+        # Carry visibility + requirements forward under the new name.
         state = self._read_state()
+        dirty = False
         vis = dict(state.get("visibility") or {})
         if old in vis:
             vis[safe] = vis.pop(old)
             state["visibility"] = vis
+            dirty = True
+        reqs = dict(state.get("requirements") or {})
+        if old in reqs:
+            reqs[safe] = reqs.pop(old)
+            state["requirements"] = reqs
+            dirty = True
+        if dirty:
             self._write_state(state)
         if self.active_object() == old:
             self.set_active_object(safe)
@@ -404,12 +432,20 @@ class Project:
         params = self.object_params_path(name)
         if params.exists():
             params.unlink()
-        # Drop any visibility entry for the deleted object.
+        # Drop any visibility / requirements entries for the deleted object.
         state = self._read_state()
+        dirty = False
         vis = dict(state.get("visibility") or {})
         if name in vis:
             vis.pop(name)
             state["visibility"] = vis
+            dirty = True
+        reqs = dict(state.get("requirements") or {})
+        if name in reqs:
+            reqs.pop(name)
+            state["requirements"] = reqs
+            dirty = True
+        if dirty:
             self._write_state(state)
         if self.active_object() == name:
             remaining = [o for o in objs if o != name]
