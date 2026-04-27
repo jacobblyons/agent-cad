@@ -3,6 +3,7 @@ import { ChatPanel } from "./ChatPanel";
 import { RightSidebar } from "./RightSidebar";
 import { ViewerPane } from "./ViewerPane";
 import { Timeline } from "./Timeline";
+import { BrowserPanel } from "./BrowserPanel";
 
 export function AppShell() {
   return (
@@ -26,6 +27,9 @@ export function AppShell() {
           </div>
         </main>
       </div>
+      {/* Floating browser preview lives outside the layout flow so it
+          can be dragged anywhere. Auto-shows on first session. */}
+      <BrowserPanel />
     </div>
   );
 }

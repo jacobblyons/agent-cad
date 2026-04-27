@@ -29,7 +29,7 @@ from claude_agent_sdk import (
     query,
 )
 
-from .. import permissions, settings
+from .. import browser_session, permissions, settings
 from ..cad.project import Project
 from ..cad.script_runner import RunResult
 from ..events import bus
@@ -71,20 +71,71 @@ PLAYWRIGHT_TOOL_NAMES = [
 
 PLAYWRIGHT_PROMPT_BLOCK = """
 PLAYWRIGHT BROWSER (experimental, enabled):
-- mcp__playwright__browser_navigate / browser_click / browser_type /
-  browser_take_screenshot / etc. give you a real Chromium browser.
-  Use it for things WebFetch can't do: pages that need login, JS-heavy
-  product configurators, downloads behind a click, etc.
-- The user may have set "ask before each browser action" in Settings.
-  When that's on, every Playwright tool call pauses and shows the user
-  a permission card with the tool name and arguments. They can approve
-  or deny. Don't take it personally if a request is denied — just pick
-  a different approach.
-- After landing on a page, ALWAYS take a screenshot or browser_snapshot
-  before clicking — selectors based on visible content are far more
-  reliable than guessing aria-labels.
-- Close the browser when you're done with `browser_close` so it doesn't
-  linger.
+The user has explicitly enabled a real Chromium browser for you to
+drive. USE IT — it is not a last-resort tool. The user can SEE the
+browser in a floating window in the app, so they're tracking what
+you're doing and they expect to see it work for the use cases below.
+
+When to reach for Playwright instead of (or after) WebSearch / WebFetch:
+- ANY MODEL MARKETPLACE: Thingiverse, Printables, GrabCAD, MakerWorld,
+  Cults3D, Yeggi, Pinshape, etc. These sites are JS-heavy, gate
+  downloads behind login or click-throughs, and serve files that
+  WebFetch can't follow. Skip web search entirely for these — go
+  STRAIGHT to browser_navigate on the site's search URL.
+- DOWNLOADING any model file from a site (vs. an API like Sketchfab's).
+  WebFetch CANNOT trigger a real download click; Playwright can.
+  Workflow: navigate to the site → search for the part → click into
+  the listing → click the download button → the file lands in the
+  browser's downloads dir → use Read or filesystem ops to pick it up
+  and copy into imports/.
+- Pages where WebFetch returns "blocked", "JS required", a login wall,
+  or a near-empty body. Don't keep trying WebFetch — switch to
+  Playwright on the same URL.
+- Manufacturer datasheet portals that need a click-through ("I agree"
+  banners, region selectors, etc.).
+- JS-heavy product configurators (PCB connectors, screw spec lookups
+  with dropdown filters, etc.).
+- ANY time you've already failed twice on a page with WebFetch /
+  WebSearch and you still need the data — escalate to Playwright
+  rather than guess. The user said it explicitly: don't fabricate
+  dimensions, look them up, and Playwright is your strongest tool
+  for that.
+
+Tool surface (all under mcp__playwright__):
+- browser_navigate(url)            open or reuse a tab
+- browser_snapshot()               accessibility tree + text → use
+                                    this BEFORE clicking; it's cheaper
+                                    than a screenshot and gives you
+                                    selectors directly
+- browser_take_screenshot()        actual rendered image; use after a
+                                    navigate for visual confirmation
+- browser_click({element, ref})    click via aria/role + index
+- browser_type({element, ref, text, submit?}) fill an input
+- browser_press_key(key)           Enter / Tab / arrow keys
+- browser_wait_for({text|time|...}) wait for content to appear
+- browser_evaluate(function)       run JS in the page when nothing
+                                    else fits
+- browser_close()                  call this at the END so the
+                                    embedded window doesn't linger
+                                    on stale state
+
+Permissions:
+- The user may have "ask before each browser action" enabled. When on,
+  every browser_* call pauses and asks for approval in the chat. If
+  you get denied, don't retry the same tool — try a different angle
+  (search the open page differently, navigate elsewhere, ask the
+  user, etc.).
+
+User-assisted interaction:
+- The embedded browser window has a small "interact" toggle. When the
+  user flips it on, their clicks + keystrokes go straight into the page
+  (alongside yours, on the same Chromium). That's how they help past
+  CAPTCHAs, login walls, age gates, geo-blockers, etc. If you HIT a
+  CAPTCHA / verification step / sign-in form and the user hasn't
+  intervened, ask them via AskUserQuestion: tell them what's blocking
+  you, and that they can flip the panel's "interact" toggle to solve it
+  themselves. Then wait — once the page advances, take a fresh
+  screenshot and continue.
 """
 
 
@@ -167,6 +218,83 @@ The `sketches` dict is auto-injected into every object script — each
 entry is a cq.Workplane already placed on the sketch's declared plane,
 ready to .extrude() / .loft() / .sweep() / .placeSketch().
 
+A SINGLE EXTRUDED PROFILE IS RARELY THE WHOLE PART:
+A real designed object almost always wants more than one sketch. If
+your only sketch is the side silhouette and your object script is one
+.extrude() call, you've made an extruded drawing, not a designed part.
+Plan for AT LEAST 2-3 sketches per non-trivial object, on different
+planes, used at different stages of the build:
+
+  - Main profile sketch on its natural plane (the silhouette).
+  - One or more SECONDARY sketches for cutouts: cable channels,
+    ports, screw bosses, finger reliefs, weight-reduction pockets,
+    drainage slots. These usually live on a DIFFERENT plane from the
+    main profile (often XZ or YZ if main is XY, or an offset plane
+    placed mid-thickness).
+  - Sketches for raised features: bosses, locating ribs, snap-fit
+    tabs, brand text, alignment dots. Place these on the face they
+    belong on via cq.Plane / .workplane(offset=...) or by selecting a
+    face after the main extrude (`wp.faces(">Z").workplane()`).
+
+Build the part in PASSES. After each pass, run_model + snapshot, then
+decide what's missing:
+  Pass 1 — rough mass: extrude the silhouette, basic boolean unions
+            for primary features.
+  Pass 2 — cutouts: cut the cable slots, ports, holes, reliefs from
+            secondary sketches.
+  Pass 3 — finishing: fillets on contact / bottom / human-touched
+            edges, chamfers on lead-ins and sharp top corners. This
+            is where a part stops looking like a CAD primitive and
+            starts looking polished.
+
+FINISHING-PASS CHECKLIST (don't ship without thinking about these):
+  - Fillets on the bottom edges that touch a surface (anti-scratch).
+  - Fillets / chamfers on edges the user grips or their phone rests
+    against — sharp 90° corners look amateur and scratch what they
+    touch.
+  - Chamfers on lead-in edges of any slot the user inserts something
+    into (cables, phones, parts).
+  - Wall thickness ≥ 2 mm anywhere it's loaded, unless the user said
+    otherwise. Check internal pockets too.
+  - Symmetry / mirroring where the design is supposed to be symmetric.
+  - For 3D printing: avoid thin overhangs; consider draft on tall
+    vertical walls if the user is printing FDM.
+  - Did you actually use the cable / cord slot the user mentioned?
+    Don't drop requested features in pass 2 because pass 1 looked
+    "good enough."
+
+STRUCTURAL + STABILITY VALIDATION (do this after fillets, before
+commit_turn):
+  - Call check_validity. If it reports anything other than a clean
+    valid solid (self-intersections, degenerate faces, non-manifold
+    edges), STOP and fix it — a "valid" CAD-runnable script can still
+    produce broken geometry. A part that doesn't pass validity won't
+    print and won't boolean correctly downstream.
+  - Call mass_properties to get center of mass + bbox. For any part
+    that RESTS ON a surface (stands, brackets, racks, hooks, lamps —
+    basically anything with a bottom), verify the COM's (x, y)
+    projects INSIDE the footprint of the bottom face. If it doesn't,
+    the part will tip the instant the user puts it down — widen the
+    base, move the heavy mass over the support, or add a counterweight
+    feature. Be especially cautious with anything that holds weight
+    above a narrow footprint (phone stands at steep angles,
+    cantilever shelves).
+  - For load-bearing parts: check the cross-section at the load path.
+    A 2 mm wall holding a 200 g phone at the top of a tall stand will
+    flex visibly. If the user expects rigidity, thicken it or add a
+    rib (which is its own sketch + extrude → another reason there
+    should be more than one sketch in the project).
+  - For mating / inserted parts (a screw boss, a peg in a hole,
+    something that slots into a port): use measure / query_faces /
+    distance_between to confirm the clearance you intended is what
+    actually got built. The wrong sketch dimension is the #1 way a
+    print comes off the bed not fitting.
+
+If after run_model + snapshot the part still looks like a flat
+extrusion of one profile, you're not done — go back and add the
+secondary sketches and the finishing fillets. The user has called
+this out specifically: extruded silhouettes feel unfinished.
+
 When the user asks for a *new* part (a separate body — e.g. "now design
 a matching lid", "add a screw to hold this together"), call
 create_object first; that creates a new seed script and makes it
@@ -234,7 +362,9 @@ Built-in tools you should reach for:
   LOOK IT UP. Search for the datasheet or standard, then fetch the
   authoritative source. Do NOT guess dimensions — guessing produces
   parts that don't fit, and the user has called this out as a recurring
-  bug.
+  bug. If WebFetch comes back empty / blocked / JS-required, and
+  Playwright is enabled, switch to mcp__playwright__browser_navigate on
+  the same URL — DON'T just give up and retry with Search.
 - TodoWrite — for any task that takes more than 2-3 tool calls, use
   TodoWrite up front to lay out the steps, then mark each completed as
   you finish. The user sees the live task list in the chat sidebar so
@@ -316,25 +446,38 @@ def _build_system_prompt(project: Project) -> str:
     return body
 
 
-def _make_permission_callback(project: Project, msg_id: str):
-    """Build a can_use_tool callback that auto-allows our own CAD tools
-    + standard editor tools, and routes Playwright (or any other) tool
-    calls through the user via the chat permission card."""
+def _make_permission_callback(project: Project, msg_id: str, *,
+                              require_permission: bool):
+    """Build a can_use_tool callback that:
+      1. Lazy-starts our embedded Chromium the first time the agent
+         actually fires a Playwright tool (so idle Playwright-enabled
+         turns don't incur the Chromium spawn cost).
+      2. Auto-allows our own CAD tools + standard editor tools.
+      3. If require_permission, routes everything else through the
+         chat permission card; otherwise auto-allows.
+    """
 
     async def callback(
         tool_name: str,
         tool_input: dict[str, Any],
         context: ToolPermissionContext,
     ):
+        # Lazy Chromium spawn: only when the agent actually reaches
+        # for a browser_* tool. Reserved port is already known.
+        if tool_name.startswith("mcp__playwright__"):
+            await asyncio.to_thread(browser_session.session.ensure_started)
+
         # Always-allow surface: our own CAD tools and the SDK's safe
-        # built-ins. Anything else (currently just Playwright) needs
-        # explicit user approval.
+        # built-ins. Playwright is the surface that may need a prompt.
         if (
             tool_name.startswith("mcp__cad__")
             or tool_name in ("Read", "Write", "Edit", "Glob", "Grep",
                              "WebSearch", "WebFetch", "TodoWrite",
                              "AskUserQuestion")
         ):
+            return PermissionResultAllow()
+
+        if not require_permission:
             return PermissionResultAllow()
 
         request_id, ev = permissions.store.request()
@@ -415,22 +558,44 @@ async def _run(project: Project, toolset: CadToolset, prompt: str,
 
     mcp_servers: dict[str, Any] = {"cad": server}
     allowed_tools = list(ALL_TOOL_NAMES)
+    cdp_http: str | None = None
     if user_settings.playwright_enabled:
+        # We don't spawn Chromium yet — reserving a CDP port lets us hand
+        # @playwright/mcp a stable --cdp-endpoint NOW, while the actual
+        # Chromium process only comes up when (and if) the agent calls
+        # its first browser_* tool. That keeps idle-but-Playwright-enabled
+        # turns from incurring the ~150 MB Chromium tax.
+        if browser_session.session.is_running:
+            cdp_http = browser_session.session.cdp_http_endpoint
+        else:
+            try:
+                browser_session.session.reserve_port()
+                cdp_http = browser_session.session.cdp_http_endpoint
+            except Exception:
+                cdp_http = None
+
+        pw_args = ["-y", "@playwright/mcp@latest"]
+        if cdp_http:
+            pw_args.extend(["--cdp-endpoint", cdp_http])
         mcp_servers["playwright"] = {
             "type": "stdio",
             "command": "npx",
-            "args": ["-y", "@playwright/mcp@latest"],
+            "args": pw_args,
         }
         allowed_tools = list(allowed_tools) + PLAYWRIGHT_TOOL_NAMES
 
-    # When the user wants permission prompts, install a can_use_tool
-    # callback that routes through the chat. CAD + safe builtins are
-    # auto-allowed inside the callback. The SDK requires streaming-mode
-    # input when can_use_tool is set, so we always wrap the prompt
-    # below.
+    # Install a can_use_tool callback whenever Playwright is enabled —
+    # we need it for the lazy-Chromium hook even when permission
+    # prompts are off. The callback itself decides whether to ask the
+    # user based on require_permission. The SDK requires streaming-mode
+    # input when can_use_tool is set, so we always wrap the prompt below
+    # in that case.
     can_use_tool = None
-    if user_settings.playwright_enabled and user_settings.playwright_require_permission:
-        can_use_tool = _make_permission_callback(project, msg_id)
+    if user_settings.playwright_enabled:
+        can_use_tool = _make_permission_callback(
+            project, msg_id,
+            require_permission=user_settings.playwright_require_permission,
+        )
 
     options = ClaudeAgentOptions(
         cwd=str(project.path),

@@ -10,6 +10,8 @@ dependencies = [
     "pillow>=10.0",
     "trimesh>=4.4",
     "numpy>=1.26",
+    "httpx>=0.27",
+    "websockets>=14",
 ]
 
 [project.optional-dependencies]

@@ -5,6 +5,12 @@ import { OpenProjectDialog } from "@/components/OpenProjectDialog";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { Welcome } from "@/components/Welcome";
 import {
+  BrowserContext,
+  type BrowserCtx,
+  type BrowserFrame,
+  type BrowserState,
+} from "@/lib/browser";
+import {
   ChatContext,
   formatAttachmentsForPrompt,
   formatPinForPrompt,
@@ -69,6 +75,32 @@ type PermissionResolvedEvent = {
   message?: string;
 };
 
+type PlaywrightFrameEvent =
+  | {
+      kind: "session_started";
+      session_id?: string;
+      url?: string;
+      title?: string;
+    }
+  | {
+      kind: "session_ended";
+      session_id?: string;
+    }
+  | {
+      kind: "navigated";
+      session_id?: string;
+      url?: string;
+    }
+  | {
+      kind: "frame";
+      session_id?: string;
+      data: string;
+      mime: string;
+      device_width?: number;
+      device_height?: number;
+      page_scale_factor?: number;
+    };
+
 type ChatEvent = {
   doc_id: string;
   msg_id: string;
@@ -87,6 +119,14 @@ export default function App() {
   const [showNew, setShowNew] = useState(false);
   const [showOpen, setShowOpen] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [browserState, setBrowserState] = useState<BrowserState>({
+    active: false,
+    url: null,
+    title: null,
+    frame: null,
+    lastFrameAt: null,
+  });
+  const [browserCollapsed, setBrowserCollapsed] = useState(true);
 
   const activeTab = useMemo(
     () => tabs.find((t) => t.doc.id === activeId) ?? null,
@@ -344,6 +384,39 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    return on<PlaywrightFrameEvent>("playwright_frame", (e) => {
+      if (e.kind === "session_started") {
+        setBrowserState((s) => ({
+          ...s,
+          active: true,
+          url: e.url ?? s.url,
+          title: e.title ?? s.title,
+        }));
+        // Auto-show the panel the first time a browser session opens.
+        setBrowserCollapsed(false);
+      } else if (e.kind === "session_ended") {
+        setBrowserState((s) => ({ ...s, active: false }));
+      } else if (e.kind === "navigated") {
+        setBrowserState((s) => ({ ...s, url: e.url ?? s.url }));
+      } else if (e.kind === "frame") {
+        const frame: BrowserFrame = {
+          data: e.data,
+          mime: e.mime,
+          deviceWidth: e.device_width,
+          deviceHeight: e.device_height,
+          scale: e.page_scale_factor,
+        };
+        setBrowserState((s) => ({
+          ...s,
+          active: true,
+          frame,
+          lastFrameAt: Date.now(),
+        }));
+      }
+    });
+  }, []);
+
+  useEffect(() => {
     return on<PermissionRequestEvent>("permission_request", (p) => {
       setTabs((cur) =>
         cur.map((t) => {
@@ -520,21 +593,31 @@ export default function App() {
     return { visible, visibleSketches, visibleImports, activeName, errorMsg };
   }, [activeTab]);
 
+  const browserCtx = useMemo<BrowserCtx>(
+    () => ({
+      ...browserState,
+      collapsed: browserCollapsed,
+      setCollapsed: setBrowserCollapsed,
+    }),
+    [browserState, browserCollapsed],
+  );
+
   return (
     <UiContext.Provider value={ui}>
       <TabsContext.Provider value={tabsCtx}>
         <ChatContext.Provider value={chatCtx}>
           <DocContext.Provider value={{ doc, refresh }}>
             <ViewerContext.Provider value={viewerCtx}>
-              {tabs.length > 0 ? (
-                <AppShell />
-              ) : (
-                <Welcome
-                  onNew={ui.openNew}
-                  onOpen={ui.openOpen}
-                  onSettings={ui.openSettings}
-                />
-              )}
+              <BrowserContext.Provider value={browserCtx}>
+                {tabs.length > 0 ? (
+                  <AppShell />
+                ) : (
+                  <Welcome
+                    onNew={ui.openNew}
+                    onOpen={ui.openOpen}
+                    onSettings={ui.openSettings}
+                  />
+                )}
               <NewProjectDialog
                 open={showNew}
                 onClose={() => setShowNew(false)}
@@ -546,6 +629,7 @@ export default function App() {
                 onOpened={addTab}
               />
               <SettingsDialog open={showSettings} onClose={() => setShowSettings(false)} />
+              </BrowserContext.Provider>
             </ViewerContext.Provider>
           </DocContext.Provider>
         </ChatContext.Provider>

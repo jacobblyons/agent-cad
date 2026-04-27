@@ -11,7 +11,7 @@ from pathlib import Path
 
 import webview
 
-from . import __version__, permissions, settings
+from . import __version__, browser_session, permissions, settings
 from .cad.project import Project, list_recent
 from .cad.script_runner import (
     RunResult,
@@ -581,6 +581,16 @@ class JsApi:
             return {"ok": True, "branch": branch, "project": proj.to_json()}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    # --- browser passthrough ------------------------------------------
+
+    def browser_send_input(self, kind: str, params: dict | None = None) -> dict:
+        """Dispatch a single input event (mouse_press / mouse_release /
+        mouse_move / key_down / key_up / insert_text / wheel) to the
+        embedded Chromium so the user can solve CAPTCHAs / log in /
+        otherwise help the agent past a wall."""
+        ok = browser_session.session.send_input(str(kind), params or {})
+        return {"ok": ok}
 
     # --- permissions ---------------------------------------------------
 

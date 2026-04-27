@@ -15,6 +15,7 @@ import { useChat } from "@/lib/chat";
 import { useTabs } from "@/lib/tabs";
 import { useUi } from "@/lib/ui";
 import { cn } from "@/lib/utils";
+import { BrowserBadge } from "./BrowserPanel";
 
 export function TabBar() {
   const { doc } = useDoc();
@@ -132,6 +133,7 @@ export function TabBar() {
       </div>
 
       <div className="flex shrink-0 items-center gap-0.5 pl-1">
+        <BrowserBadge />
         {doc && (
           <span
             className="mr-2 max-w-[260px] truncate font-mono text-[10px] text-[var(--color-muted)]"
