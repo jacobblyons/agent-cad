@@ -79,7 +79,13 @@ def _pick_free_port() -> int:
 def _candidate_chromium_paths() -> list[Path]:
     """Where to look for a Chromium binary on Windows. We try the
     Playwright cache first since that's the version `@playwright/mcp`
-    will know how to drive, then fall back to system Chrome / Edge."""
+    will know how to drive, then fall back to system Chrome / Edge.
+
+    The cache lookup globs recursively for the executable rather than
+    hard-coding a sub-path: Playwright's layout has churned over the
+    years (chrome-win, chrome-win64, chrome-mac/Chromium.app/...,
+    chrome-linux) and the rglob always finds whichever shape is on
+    disk."""
     out: list[Path] = []
     env = os.environ.get("AGENTCAD_CHROMIUM")
     if env:
@@ -89,9 +95,9 @@ def _candidate_chromium_paths() -> list[Path]:
         ms_pw = Path(local) / "ms-playwright"
         if ms_pw.is_dir():
             for child in sorted(ms_pw.glob("chromium-*"), reverse=True):
-                out.append(child / "chrome-win" / "chrome.exe")
+                out.extend(sorted(child.rglob("chrome.exe")))
             for child in sorted(ms_pw.glob("chromium_headless_shell-*"), reverse=True):
-                out.append(child / "chrome-win" / "headless_shell.exe")
+                out.extend(sorted(child.rglob("headless_shell.exe")))
     program_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
     program_files_x86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
     out.extend([
@@ -201,31 +207,32 @@ class BrowserSession:
                 stderr=subprocess.DEVNULL,
             )
 
-            # Chromium writes its actual port to DevToolsActivePort once
-            # it's up. Wait briefly for it to come online.
-            port_file = user_data_dir / "DevToolsActivePort"
+            # Poll the CDP HTTP endpoint until it's serving /json/version.
+            # We can't rely on the DevToolsActivePort file landing in
+            # user-data-dir: Playwright's bundled Chromium writes it, but
+            # system Chrome under --headless=new does not — instead it
+            # prints the WS URL to stderr (which we suppress). HTTP polling
+            # works for both, and gets us the WS URL in the same step.
             deadline = time.time() + timeout
             ready = False
             while time.time() < deadline:
                 if self._proc.poll() is not None:
                     break  # crashed
-                if port_file.exists():
-                    ready = True
-                    break
+                try:
+                    with httpx.Client(timeout=0.5) as c:
+                        info = c.get(f"{self._cdp_http}/json/version").json()
+                    ws = info.get("webSocketDebuggerUrl")
+                    if ws:
+                        self._cdp_ws_browser = ws
+                        ready = True
+                        break
+                except Exception:
+                    pass
                 time.sleep(0.1)
             if not ready:
                 log.warning("Chromium failed to come online on the reserved port")
                 self._cleanup_after_failure()
                 return None
-
-            # Resolve the browser WS URL via /json/version.
-            try:
-                with httpx.Client(timeout=5.0) as c:
-                    info = c.get(f"{self._cdp_http}/json/version").json()
-                self._cdp_ws_browser = info.get("webSocketDebuggerUrl")
-            except Exception as e:
-                log.warning(f"could not fetch CDP /json/version: {e}")
-                self._cdp_ws_browser = None
 
             # Kick off the screencast forwarder thread.
             self._stop_evt.clear()
@@ -339,6 +346,14 @@ class BrowserSession:
 
                 # Set of session IDs we've already started screencasting on.
                 started_sessions: set[str] = set()
+                # Sessions whose `session_started` event we've held back
+                # because their initial URL is the about:blank Chromium
+                # opens at startup. We emit the event when the agent
+                # navigates somewhere real.
+                pending_announcement: dict[str, dict[str, Any]] = {}
+
+                def _is_blank_url(u: str) -> bool:
+                    return not u or u in ("about:blank", "chrome://newtab/", "chrome://new-tab-page/")
 
                 while not self._stop_evt.is_set():
                     try:
@@ -374,14 +389,20 @@ class BrowserSession:
                             "everyNthFrame": 1,
                         }, session_id=sid)
                         await ws.send(m)
-                        # Surface a "browser opened" event so the FE can
-                        # show the panel even before the first frame.
-                        bus.emit("playwright_frame", {
-                            "kind": "session_started",
-                            "session_id": sid,
-                            "url": info.get("url") or "",
-                            "title": info.get("title") or "",
-                        })
+                        # Don't auto-show the panel for the about:blank
+                        # tab Chromium opens at startup — wait until the
+                        # agent (or user) navigates somewhere real.
+                        url = info.get("url") or ""
+                        title = info.get("title") or ""
+                        if _is_blank_url(url):
+                            pending_announcement[sid] = {"url": url, "title": title}
+                        else:
+                            bus.emit("playwright_frame", {
+                                "kind": "session_started",
+                                "session_id": sid,
+                                "url": url,
+                                "title": title,
+                            })
                         continue
 
                     if data.get("method") == "Page.screencastFrame":
@@ -423,10 +444,21 @@ class BrowserSession:
                         # Only the main frame matters for the FE banner.
                         if frame.get("parentId"):
                             continue
+                        url = frame.get("url") or ""
+                        # First real navigation flushes the deferred
+                        # session_started — the panel pops up here.
+                        if sid in pending_announcement and not _is_blank_url(url):
+                            pending = pending_announcement.pop(sid)
+                            bus.emit("playwright_frame", {
+                                "kind": "session_started",
+                                "session_id": sid,
+                                "url": url,
+                                "title": pending.get("title") or "",
+                            })
                         bus.emit("playwright_frame", {
                             "kind": "navigated",
                             "session_id": sid,
-                            "url": frame.get("url") or "",
+                            "url": url,
                         })
                         continue
 

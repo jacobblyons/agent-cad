@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   Circle,
@@ -14,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { DrawingDialog } from "./DrawingDialog";
+import { Markdown } from "./Markdown";
 import { call } from "@/lib/pywebview";
 import {
   useChat,
@@ -42,6 +43,74 @@ function fmtToolInput(input: unknown) {
 }
 
 const TEXTAREA_MAX_PX = 240;
+
+/** Renders text capped to `collapsedMax` px tall with a bottom fade and an
+ * Expand toggle when the content overflows. The whole chat scroller is
+ * already scrollable, so giving each tool result its own inner scrollbar
+ * was the worst of both worlds — pick one or the other. */
+function CollapsibleText({
+  text,
+  collapsedMax = 160,
+  fadeVar = "--color-panel-2",
+  className,
+}: {
+  text: string;
+  collapsedMax?: number;
+  /** CSS variable name for the parent bg, used for the fade-out gradient. */
+  fadeVar?: string;
+  className?: string;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [overflows, setOverflows] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => {
+      // Compare unconstrained content height to the cap. We measure
+      // against the inner content wrapper, not the outer (which has
+      // maxHeight applied), so scrollHeight is the FULL height.
+      setOverflows(el.scrollHeight > collapsedMax + 1);
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text, collapsedMax]);
+
+  return (
+    <div className={cn("relative", className)}>
+      <div
+        ref={ref}
+        style={{
+          maxHeight: expanded ? undefined : collapsedMax,
+          overflow: "hidden",
+        }}
+        className="whitespace-pre-wrap break-all"
+      >
+        {text}
+      </div>
+      {overflows && !expanded && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 bottom-6 h-6"
+          style={{
+            background: `linear-gradient(to top, var(${fadeVar}), transparent)`,
+          }}
+        />
+      )}
+      {overflows && (
+        <button
+          onClick={() => setExpanded((e) => !e)}
+          className="mt-1 text-[10px] uppercase tracking-wider text-[var(--color-muted)] hover:text-[var(--color-text)]"
+        >
+          {expanded ? "Collapse" : "Expand"}
+        </button>
+      )}
+    </div>
+  );
+}
 
 export function ChatPanel() {
   const { doc } = useDoc();
@@ -204,9 +273,9 @@ function AssistantTurn({
           return (
             <div
               key={i}
-              className="max-w-[95%] whitespace-pre-wrap rounded-md bg-[var(--color-panel-2)] px-3 py-2 text-sm leading-relaxed"
+              className="max-w-[95%] rounded-md bg-[var(--color-panel-2)] px-3 py-2"
             >
-              {b.text}
+              <Markdown text={b.text} />
             </div>
           );
         }
@@ -331,9 +400,10 @@ function ToolCard({ block }: { block: ChatToolBlock }) {
         </span>
       </div>
       {block.resultText && (
-        <div className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-all pl-5 font-mono">
-          {block.resultText}
-        </div>
+        <CollapsibleText
+          text={block.resultText}
+          className="mt-1 pl-5 font-mono"
+        />
       )}
       {block.resultImages && block.resultImages.length > 0 && (
         <div className="mt-2 space-y-1.5 pl-5">
@@ -403,9 +473,10 @@ function AskUserQuestionCard({ block }: { block: ChatToolBlock }) {
         </div>
       </div>
       {block.resultText && (
-        <div className="mt-2 whitespace-pre-wrap pl-6 text-xs text-[var(--color-muted)]">
-          {block.resultText}
-        </div>
+        <CollapsibleText
+          text={block.resultText}
+          className="mt-2 pl-6 text-xs text-[var(--color-muted)]"
+        />
       )}
     </div>
   );

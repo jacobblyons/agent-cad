@@ -4,6 +4,7 @@ import {
   Eye,
   EyeOff,
   FileBox,
+  Loader2,
   Pencil,
   Plus,
   Trash2,
@@ -12,7 +13,9 @@ import {
 import { call } from "@/lib/pywebview";
 import { useDoc } from "@/lib/doc";
 import { useChat } from "@/lib/chat";
+import { useTabs } from "@/lib/tabs";
 import { cn } from "@/lib/utils";
+import { useContextMenu, type MenuItem } from "@/lib/contextMenu";
 
 /**
  * Read-only reference geometry the user supplied. Same panel shape as
@@ -25,11 +28,15 @@ import { cn } from "@/lib/utils";
 export function ImportBrowser() {
   const { doc } = useDoc();
   const { isAgentRunning } = useChat();
+  const { tabs, activeId } = useTabs();
   const [renaming, setRenaming] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
 
   if (!doc) return null;
   const imports = doc.imports ?? [];
+  const activeTab = tabs.find((t) => t.doc.id === activeId);
+  const isLoading = (name: string) =>
+    activeTab?.importGeometry[name]?.loading === true;
 
   const addImport = async () => {
     if (isAgentRunning || adding) return;
@@ -84,6 +91,7 @@ export function ImportBrowser() {
                 ext={m.ext}
                 sizeBytes={m.size_bytes}
                 visible={m.visible}
+                loading={isLoading(m.name)}
                 disabled={isAgentRunning}
                 onRename={() => setRenaming(m.name)}
               />
@@ -107,6 +115,7 @@ function ImportRow({
   ext,
   sizeBytes,
   visible,
+  loading,
   disabled,
   onRename,
 }: {
@@ -115,9 +124,11 @@ function ImportRow({
   ext: string;
   sizeBytes: number;
   visible: boolean;
+  loading: boolean;
   disabled: boolean;
   onRename: () => void;
 }) {
+  const openMenu = useContextMenu();
   const toggleVisible = async () => {
     if (disabled) return;
     await call("import_set_visible", docId, name, !visible);
@@ -132,9 +143,39 @@ function ImportRow({
       return;
     await call("import_delete", docId, name);
   };
+  const onContextMenu = (e: React.MouseEvent) => {
+    const items: MenuItem[] = [
+      {
+        kind: "action",
+        label: visible ? "Hide" : "Show",
+        icon: visible ? EyeOff : Eye,
+        onClick: () => void toggleVisible(),
+        disabled,
+      },
+      { kind: "separator" },
+      {
+        kind: "action",
+        label: "Rename",
+        icon: Pencil,
+        onClick: onRename,
+        disabled,
+      },
+      { kind: "separator" },
+      {
+        kind: "action",
+        label: "Delete",
+        icon: Trash2,
+        onClick: () => void del(),
+        disabled,
+        danger: true,
+      },
+    ];
+    openMenu(e, items);
+  };
   const VisIcon = visible ? Eye : EyeOff;
   return (
     <div
+      onContextMenu={onContextMenu}
       className={cn(
         "group flex items-center gap-1.5 rounded-sm px-2 py-1 text-xs",
         "text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-text)]",
@@ -143,17 +184,29 @@ function ImportRow({
     >
       <button
         onClick={toggleVisible}
-        disabled={disabled}
-        title={visible ? "Hide in viewer" : "Show in viewer"}
+        disabled={disabled || loading}
+        title={
+          loading
+            ? "Loading…"
+            : visible
+              ? "Hide in viewer"
+              : "Show in viewer"
+        }
         className={cn(
           "rounded p-0.5 transition hover:bg-[var(--color-hover)] hover:text-[var(--color-text)]",
-          visible
-            ? "opacity-0 group-hover:opacity-60 hover:!opacity-100"
-            : "opacity-100 text-[var(--color-muted)]",
-          disabled && "opacity-30",
+          loading
+            ? "opacity-100 text-[var(--color-accent)]"
+            : visible
+              ? "opacity-0 group-hover:opacity-60 hover:!opacity-100"
+              : "opacity-100 text-[var(--color-muted)]",
+          (disabled && !loading) && "opacity-30",
         )}
       >
-        <VisIcon size={11} />
+        {loading ? (
+          <Loader2 size={11} className="animate-spin" />
+        ) : (
+          <VisIcon size={11} />
+        )}
       </button>
       <FileBox size={11} className={cn("shrink-0", !visible && "opacity-40")} />
       <span

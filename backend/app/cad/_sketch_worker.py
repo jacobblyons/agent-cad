@@ -15,6 +15,10 @@ Output JSON shape on success:
         {"points": [[x,y,z], ...], "closed": true|false},
         ...
       ],
+      "dimensions": [
+        {"kind": "length"|"radius", "value": float, "anchor": [x,y,z]},
+        ...
+      ],
       "bbox": {"min": [...], "max": [...]}
     }
 """
@@ -26,6 +30,68 @@ import runpy
 import sys
 import traceback
 from pathlib import Path
+
+
+def _to_world(local, plane) -> list[float]:
+    try:
+        w = plane.toWorldCoords((float(local.x), float(local.y)))
+        return [float(w.x), float(w.y), float(w.z)]
+    except Exception:
+        return [float(local.x), float(local.y), float(getattr(local, "z", 0.0))]
+
+
+def _edge_dimension(edge, plane) -> dict | None:
+    """One dimension entry per edge. LINE / ARC / spline → length at midpoint;
+    full CIRCLE → radius at center. Returns None for degenerate edges so
+    near-zero-length strokes don't pollute the overlay."""
+    geom = ""
+    try:
+        geom = (edge.geomType() or "").upper()
+    except Exception:
+        pass
+    try:
+        length = float(edge.Length())
+    except Exception:
+        return None
+    if length <= 1e-4:
+        return None
+
+    # Full circle: start ≈ end, single edge wraps around. Emit the radius
+    # at the geometric center of the sampled span instead of the midpoint
+    # (which would be the antipode of the seam).
+    if geom == "CIRCLE":
+        try:
+            sp = edge.startPoint()
+            ep = edge.endPoint()
+            if (abs(sp.x - ep.x) < 1e-6 and abs(sp.y - ep.y) < 1e-6
+                    and abs(getattr(sp, "z", 0.0) - getattr(ep, "z", 0.0)) < 1e-6):
+                radius = length / (2.0 * math.pi)
+                # Center ≈ average of two opposite samples on the circle.
+                try:
+                    a = edge.positionAt(0.0)
+                    b = edge.positionAt(0.5)
+                    cx = 0.5 * (float(a.x) + float(b.x))
+                    cy = 0.5 * (float(a.y) + float(b.y))
+                    center_local = type("P", (), {"x": cx, "y": cy})()
+                    return {
+                        "kind": "radius",
+                        "value": radius,
+                        "anchor": _to_world(center_local, plane),
+                    }
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    try:
+        mid = edge.positionAt(0.5)
+    except Exception:
+        return None
+    return {
+        "kind": "length",
+        "value": length,
+        "anchor": _to_world(mid, plane),
+    }
 
 
 def _sample_edge(edge, plane, tol: float) -> list[list[float]]:
@@ -45,21 +111,12 @@ def _sample_edge(edge, plane, tol: float) -> list[list[float]]:
     except Exception:
         length = 0.0
 
-    def _to_world(local) -> list[float]:
-        # `plane.toWorldCoords` accepts a 2-tuple; sketch geometry sits on
-        # the local XY plane (z=0) in the sketch's own frame.
-        try:
-            w = plane.toWorldCoords((float(local.x), float(local.y)))
-            return [float(w.x), float(w.y), float(w.z)]
-        except Exception:
-            return [float(local.x), float(local.y), float(getattr(local, "z", 0.0))]
-
     # Straight line: endpoints are enough.
     if geom == "LINE":
         try:
             sp = edge.startPoint()
             ep = edge.endPoint()
-            return [_to_world(sp), _to_world(ep)]
+            return [_to_world(sp, plane), _to_world(ep, plane)]
         except Exception:
             pass
 
@@ -72,7 +129,7 @@ def _sample_edge(edge, plane, tol: float) -> list[list[float]]:
         u = i / n
         try:
             p = edge.positionAt(u)
-            pts.append(_to_world(p))
+            pts.append(_to_world(p, plane))
         except Exception:
             continue
     return pts
@@ -124,6 +181,7 @@ def main() -> int:
             local_faces = []
 
         polylines: list[dict] = []
+        dimensions: list[dict] = []
         xmin = ymin = zmin = float("inf")
         xmax = ymax = zmax = float("-inf")
 
@@ -132,12 +190,18 @@ def main() -> int:
             xmin = min(xmin, p[0]); ymin = min(ymin, p[1]); zmin = min(zmin, p[2])
             xmax = max(xmax, p[0]); ymax = max(ymax, p[1]); zmax = max(zmax, p[2])
 
+        def collect_edge(edge) -> list[list[float]]:
+            dim = _edge_dimension(edge, plane_obj)
+            if dim is not None:
+                dimensions.append(dim)
+            return _sample_edge(edge, plane_obj, tol)
+
         if local_faces:
             for face in local_faces:
                 for wire in face.Wires():
                     pts: list[list[float]] = []
                     for edge in wire.Edges():
-                        seg = _sample_edge(edge, plane_obj, tol)
+                        seg = collect_edge(edge)
                         # Avoid duplicating the join point between consecutive
                         # edges in the same wire.
                         if pts and seg and pts[-1] == seg[0]:
@@ -162,7 +226,7 @@ def main() -> int:
             except Exception:
                 edges = []
             for edge in edges:
-                pts = _sample_edge(edge, plane_obj, tol)
+                pts = collect_edge(edge)
                 if pts:
                     polylines.append({"points": pts, "closed": False})
                     for p in pts:
@@ -193,6 +257,7 @@ def main() -> int:
             "ok": True,
             "plane": plane_info,
             "polylines": polylines,
+            "dimensions": dimensions,
             "bbox": {
                 "min": [xmin, ymin, zmin],
                 "max": [xmax, ymax, zmax],

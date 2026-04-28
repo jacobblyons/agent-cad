@@ -37,5 +37,8 @@ Thumbs.db
 # Generated CAD artifacts not under user control
 *.gltf.cache
 
-# Claude Code local project state
-.claude/
+# Claude Code local project state — but keep shared skills + agents tracked
+# so contributors using Claude Code pick up the same tooling.
+.claude/*
+!.claude/skills/
+!.claude/agents/

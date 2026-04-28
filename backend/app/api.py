@@ -236,14 +236,22 @@ class JsApi:
         window = webview.windows[0] if webview.windows else None
         if window is None:
             return {"ok": False, "error": "no window"}
+        # Default the save dialog to <project>/exports/ — keeps build
+        # artifacts colocated with the project they came from instead of
+        # scattering them across whatever directory the user happened to
+        # pick last. Created on demand so empty projects don't have a
+        # stray empty folder.
+        exports_dir = proj.path / "exports"
+        exports_dir.mkdir(parents=True, exist_ok=True)
         result = window.create_file_dialog(
             webview.SAVE_DIALOG,
+            directory=str(exports_dir),
             save_filename=f"{name}.stl",
             file_types=(
-                "STL — 3D printing (*.stl)",
-                "STEP — parametric CAD (*.step)",
-                "3MF — modern STL replacement (*.3mf)",
-                "BREP — OpenCascade native (*.brep)",
+                "STL 3D printing (*.stl)",
+                "STEP parametric CAD (*.step)",
+                "3MF modern STL replacement (*.3mf)",
+                "BREP OpenCascade native (*.brep)",
             ),
         )
         if not result:
@@ -278,14 +286,17 @@ class JsApi:
         window = webview.windows[0] if webview.windows else None
         if window is None:
             return {"ok": False, "error": "no window"}
+        exports_dir = proj.path / "exports"
+        exports_dir.mkdir(parents=True, exist_ok=True)
         result = window.create_file_dialog(
             webview.SAVE_DIALOG,
+            directory=str(exports_dir),
             save_filename=f"{proj.title}.stl",
             file_types=(
-                "STL — 3D printing (*.stl)",
-                "STEP — parametric CAD (*.step)",
-                "3MF — modern STL replacement (*.3mf)",
-                "BREP — OpenCascade native (*.brep)",
+                "STL 3D printing (*.stl)",
+                "STEP parametric CAD (*.step)",
+                "3MF modern STL replacement (*.3mf)",
+                "BREP OpenCascade native (*.brep)",
             ),
         )
         if not result:
@@ -623,6 +634,12 @@ class JsApi:
 
     def _emit_object_geometry(self, project: Project, name: str) -> None:
         """Run one object's script and push its geometry to the viewer."""
+        # Tell the FE we're loading right now so the row can show a
+        # spinner instead of staring at a stale frame for the seconds
+        # it takes to run the script.
+        bus.emit("doc_geometry", {
+            "doc_id": project.id, "object": name, "loading": True,
+        })
         try:
             result = run_script(
                 project.object_source_path(name),
@@ -662,6 +679,9 @@ class JsApi:
                 "error": f"import '{name}' not found on disk",
             })
             return
+        bus.emit("doc_import_geometry", {
+            "doc_id": project.id, "import": name, "loading": True,
+        })
         try:
             result = tessellate_import_script(source, cwd=project.path, timeout=60.0)
         except Exception as e:
@@ -686,6 +706,9 @@ class JsApi:
 
     def _emit_sketch_geometry(self, project: Project, name: str) -> None:
         """Tessellate one sketch's wires and push to the viewer overlay."""
+        bus.emit("doc_sketch_geometry", {
+            "doc_id": project.id, "sketch": name, "loading": True,
+        })
         try:
             result = tessellate_sketch_script(
                 project.sketch_source_path(name),
@@ -709,6 +732,7 @@ class JsApi:
             "stderr": result.stderr,
             "plane": result.plane,
             "polylines": result.polylines,
+            "dimensions": result.dimensions,
             "bbox": result.bbox,
         })
 

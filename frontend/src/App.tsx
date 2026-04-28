@@ -36,6 +36,7 @@ type GeometryEvent = {
   glb_b64?: string;
   topology?: import("@/lib/viewer").Topology | null;
   error?: string;
+  loading?: boolean;
 };
 
 type SketchGeometryEvent = {
@@ -45,7 +46,9 @@ type SketchGeometryEvent = {
   error?: string;
   deleted?: boolean;
   polylines?: { points: [number, number, number][]; closed: boolean }[] | null;
+  dimensions?: import("@/lib/viewer").SketchDimension[] | null;
   plane?: import("@/lib/viewer").SketchGeometry["plane"];
+  loading?: boolean;
 };
 
 type ImportGeometryEvent = {
@@ -56,6 +59,7 @@ type ImportGeometryEvent = {
   deleted?: boolean;
   glb_b64?: string;
   topology?: import("@/lib/viewer").Topology | null;
+  loading?: boolean;
 };
 
 type PermissionRequestEvent = {
@@ -304,15 +308,22 @@ export default function App() {
             topology: null,
             errorMsg: null,
           };
+          // A "loading" event keeps the previous geometry visible (so the
+          // viewer doesn't blank out) but flips the spinner on. The
+          // resolved event clears loading and updates the GLB / error.
+          const loading = p.loading === true;
           return {
             ...t,
             geometry: {
               ...t.geometry,
-              [p.object]: {
-                glbB64: p.glb_b64 ?? prev.glbB64,
-                topology: p.topology ?? prev.topology,
-                errorMsg: p.error ?? null,
-              },
+              [p.object]: loading
+                ? { ...prev, loading: true }
+                : {
+                    glbB64: p.glb_b64 ?? prev.glbB64,
+                    topology: p.topology ?? prev.topology,
+                    errorMsg: p.error ?? null,
+                    loading: false,
+                  },
             },
           };
         }),
@@ -325,7 +336,6 @@ export default function App() {
       setTabs((cur) =>
         cur.map((t) => {
           if (t.doc.id !== p.doc_id) return t;
-          // Sketch deleted on the backend → drop the cached overlay.
           if (p.deleted) {
             const next = { ...t.sketchGeometry };
             delete next[p.sketch];
@@ -333,18 +343,24 @@ export default function App() {
           }
           const prev = t.sketchGeometry[p.sketch] ?? {
             polylines: null,
+            dimensions: null,
             plane: null,
             errorMsg: null,
           };
+          const loading = p.loading === true;
           return {
             ...t,
             sketchGeometry: {
               ...t.sketchGeometry,
-              [p.sketch]: {
-                polylines: p.polylines ?? prev.polylines,
-                plane: p.plane ?? prev.plane,
-                errorMsg: p.error ?? null,
-              },
+              [p.sketch]: loading
+                ? { ...prev, loading: true }
+                : {
+                    polylines: p.polylines ?? prev.polylines,
+                    dimensions: p.dimensions ?? prev.dimensions,
+                    plane: p.plane ?? prev.plane,
+                    errorMsg: p.error ?? null,
+                    loading: false,
+                  },
             },
           };
         }),
@@ -367,15 +383,19 @@ export default function App() {
             topology: null,
             errorMsg: null,
           };
+          const loading = p.loading === true;
           return {
             ...t,
             importGeometry: {
               ...t.importGeometry,
-              [p.import]: {
-                glbB64: p.glb_b64 ?? prev.glbB64,
-                topology: p.topology ?? prev.topology,
-                errorMsg: p.error ?? null,
-              },
+              [p.import]: loading
+                ? { ...prev, loading: true }
+                : {
+                    glbB64: p.glb_b64 ?? prev.glbB64,
+                    topology: p.topology ?? prev.topology,
+                    errorMsg: p.error ?? null,
+                    loading: false,
+                  },
             },
           };
         }),
@@ -406,9 +426,12 @@ export default function App() {
           deviceHeight: e.device_height,
           scale: e.page_scale_factor,
         };
+        // Don't flip `active` here — only session_started should do
+        // that. Frames arrive while the agent is on about:blank too;
+        // we want them buffered into state but not visible until the
+        // session is announced.
         setBrowserState((s) => ({
           ...s,
-          active: true,
           frame,
           lastFrameAt: Date.now(),
         }));
@@ -571,6 +594,7 @@ export default function App() {
         name: s.name,
         geometry: activeTab.sketchGeometry[s.name] ?? {
           polylines: null,
+          dimensions: null,
           plane: null,
           errorMsg: null,
         },

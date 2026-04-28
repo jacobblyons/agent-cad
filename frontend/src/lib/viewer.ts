@@ -31,6 +31,9 @@ export type ObjectGeometry = {
   glbB64: string | null;
   topology: Topology | null;
   errorMsg: string | null;
+  /** True while the backend is re-running the script for this object.
+   * The browser row uses this to swap the eye icon for a spinner. */
+  loading?: boolean;
 };
 
 export type VisibleObject = {
@@ -38,10 +41,21 @@ export type VisibleObject = {
   geometry: ObjectGeometry;
 };
 
+/** A single edge measurement, anchored in world coords. `length` is an
+ * arc-length value (lines, arcs, splines); `radius` is emitted only for
+ * full circles. The viewer formats these as floating labels. */
+export type SketchDimension = {
+  kind: "length" | "radius";
+  value: number;
+  anchor: [number, number, number];
+};
+
 /** A sketch's wires projected into 3D, ready for line rendering. */
 export type SketchGeometry = {
   /** ordered point lists; one entry per closed-or-open wire */
   polylines: { points: [number, number, number][]; closed: boolean }[] | null;
+  /** per-edge measurements, anchored in world coords for label placement */
+  dimensions: SketchDimension[] | null;
   /** info about the sketch's plane (origin + axes), for future overlay HUD */
   plane: {
     origin: [number, number, number];
@@ -50,6 +64,7 @@ export type SketchGeometry = {
     normal: [number, number, number];
   } | null;
   errorMsg: string | null;
+  loading?: boolean;
 };
 
 export type VisibleSketch = {

@@ -29,7 +29,14 @@ def _face_to_trimesh(face, deflection: float) -> trimesh.Trimesh | None:
         return None
     v_arr = np.array([(v.x, v.y, v.z) for v in verts], dtype=np.float32)
     t_arr = np.array(tris, dtype=np.uint32)
-    return trimesh.Trimesh(vertices=v_arr, faces=t_arr, process=False)
+    mesh = trimesh.Trimesh(vertices=v_arr, faces=t_arr, process=False)
+    # Touch vertex_normals so trimesh computes & caches them; the glTF
+    # exporter then writes them into the glb. Without this the file ships
+    # without normals and three.js's PBR shader has nothing to compute
+    # lighting against — the surface renders fully black no matter how
+    # many lights you add.
+    _ = mesh.vertex_normals
+    return mesh
 
 
 def _sample_edge(edge, samples: int = EDGE_SAMPLES) -> list[list[float]]:
@@ -77,7 +84,9 @@ def to_glb(workplane: Any, deflection: float = 0.1) -> bytes:
         verts, tris = shape.tessellate(deflection)
         v_arr = np.array([(v.x, v.y, v.z) for v in verts], dtype=np.float32)
         t_arr = np.array(tris, dtype=np.uint32)
-        scene.add_geometry(trimesh.Trimesh(vertices=v_arr, faces=t_arr, process=False))
+        fallback = trimesh.Trimesh(vertices=v_arr, faces=t_arr, process=False)
+        _ = fallback.vertex_normals  # populate normals; see _face_to_trimesh
+        scene.add_geometry(fallback)
     return scene.export(file_type="glb")
 
 

@@ -4,38 +4,48 @@ import { ObjectBrowser } from "./ObjectBrowser";
 import { SketchBrowser } from "./SketchBrowser";
 import { ImportBrowser } from "./ImportBrowser";
 
-const STORAGE_KEY = "agent-cad:right-sidebar:objects-h";
-const DEFAULT_PX = 220;
-const MIN_OBJECTS_PX = 80;
-const MIN_TWEAKS_PX = 80;
+// Fraction of the right-sidebar height given to the browsers (objects /
+// sketches / imports). Stored as a 0..1 ratio rather than pixels so the
+// split scales with the window — the previous fixed 220px ate the screen
+// at low heights and looked tiny on big monitors.
+const STORAGE_KEY = "agent-cad:right-sidebar:bottom-fraction";
+const DEFAULT_FRACTION = 0.5;
+const MIN_FRACTION = 0.12;
+const MAX_FRACTION = 0.88;
 
 export function RightSidebar() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [objectsHeight, setObjectsHeight] = useState<number>(() => {
+  const [bottomFraction, setBottomFraction] = useState<number>(() => {
     const raw = typeof window !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
-    const n = raw ? parseInt(raw, 10) : NaN;
-    return Number.isFinite(n) ? n : DEFAULT_PX;
+    const n = raw ? parseFloat(raw) : NaN;
+    if (!Number.isFinite(n)) return DEFAULT_FRACTION;
+    return Math.min(MAX_FRACTION, Math.max(MIN_FRACTION, n));
   });
-  const dragStateRef = useRef<{ startY: number; startH: number } | null>(null);
+  const dragStateRef = useRef<{ startY: number; startFraction: number } | null>(null);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, String(Math.round(objectsHeight)));
-  }, [objectsHeight]);
+    localStorage.setItem(STORAGE_KEY, bottomFraction.toFixed(4));
+  }, [bottomFraction]);
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
-    dragStateRef.current = { startY: e.clientY, startH: objectsHeight };
+    dragStateRef.current = { startY: e.clientY, startFraction: bottomFraction };
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragStateRef.current;
     if (!drag) return;
-    const delta = drag.startY - e.clientY; // dragging up grows objects pane
-    const containerH = containerRef.current?.clientHeight ?? 600;
-    const max = Math.max(MIN_OBJECTS_PX, containerH - MIN_TWEAKS_PX);
-    const next = Math.min(max, Math.max(MIN_OBJECTS_PX, drag.startH + delta));
-    setObjectsHeight(next);
+    const containerH = containerRef.current?.clientHeight ?? 1;
+    if (containerH <= 0) return;
+    // Dragging up grows the bottom (browsers) pane; convert pixel delta
+    // into a fraction delta against the live container height.
+    const deltaFraction = (drag.startY - e.clientY) / containerH;
+    const next = Math.min(
+      MAX_FRACTION,
+      Math.max(MIN_FRACTION, drag.startFraction + deltaFraction),
+    );
+    setBottomFraction(next);
   };
 
   const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -45,9 +55,15 @@ export function RightSidebar() {
     }
   };
 
+  const topFlex = 1 - bottomFraction;
+  const bottomFlex = bottomFraction;
+
   return (
     <div ref={containerRef} className="flex h-full min-h-0 flex-col">
-      <div className="min-h-0 flex-1">
+      <div
+        className="min-h-0"
+        style={{ flex: `${topFlex} 1 0`, minHeight: 80 }}
+      >
         <TweaksPanel />
       </div>
       <div
@@ -64,8 +80,8 @@ export function RightSidebar() {
         <div className="absolute inset-x-0 -top-1 -bottom-1" />
       </div>
       <div
-        className="shrink-0 flex flex-col min-h-0"
-        style={{ height: `${objectsHeight}px` }}
+        className="flex flex-col min-h-0"
+        style={{ flex: `${bottomFlex} 1 0`, minHeight: 120 }}
       >
         <div className="min-h-0 flex-1 border-b border-[var(--color-border)]">
           <ObjectBrowser />

@@ -175,6 +175,7 @@ class SketchResult:
     error: str | None = None
     plane: dict | None = None
     polylines: list[dict] | None = None
+    dimensions: list[dict] | None = None
     bbox: dict | None = None
     stderr: str = ""
 
@@ -313,6 +314,7 @@ def tessellate_sketch(script_path: Path, params_path: Path, *,
         error=data.get("error"),
         plane=data.get("plane"),
         polylines=data.get("polylines"),
+        dimensions=data.get("dimensions"),
         bbox=data.get("bbox"),
         stderr=proc.stderr,
     )

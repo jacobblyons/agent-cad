@@ -8,6 +8,9 @@ operate on the active object automatically.
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
+import subprocess
 import threading
 import traceback
 import uuid
@@ -68,6 +71,40 @@ PLAYWRIGHT_TOOL_NAMES = [
     f"{PLAYWRIGHT_TOOL_PREFIX}browser_wait_for",
 ]
 
+# `@playwright/mcp` uses the `with { type: "json" }` import attribute
+# syntax (added in Node 20.10) and bundles a yauzl that needs the
+# require/import interop fixes from that release line. Older Node
+# crashes the MCP subprocess silently on first import, so no tools
+# register and the agent looks stuck. We pre-flight the version below.
+PW_MIN_NODE: tuple[int, int, int] = (20, 10, 0)
+
+
+def _node_version() -> tuple[int, int, int] | None:
+    """Returns the local Node version as (major, minor, patch), or None
+    if Node isn't on PATH or its `--version` output can't be parsed."""
+    node = shutil.which("node")
+    if not node:
+        return None
+    try:
+        proc = subprocess.run(
+            [node, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    out = (proc.stdout or "").strip()
+    if out.startswith("v"):
+        out = out[1:]
+    parts = out.split(".")
+    if len(parts) < 3:
+        return None
+    try:
+        return int(parts[0]), int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
+
 
 PLAYWRIGHT_PROMPT_BLOCK = """
 PLAYWRIGHT BROWSER (experimental, enabled):
@@ -126,16 +163,36 @@ Permissions:
   (search the open page differently, navigate elsewhere, ask the
   user, etc.).
 
-User-assisted interaction:
+User-assisted interaction (bot gates / CAPTCHAs / logins):
 - The embedded browser window has a small "interact" toggle. When the
   user flips it on, their clicks + keystrokes go straight into the page
   (alongside yours, on the same Chromium). That's how they help past
-  CAPTCHAs, login walls, age gates, geo-blockers, etc. If you HIT a
-  CAPTCHA / verification step / sign-in form and the user hasn't
-  intervened, ask them via AskUserQuestion: tell them what's blocking
-  you, and that they can flip the panel's "interact" toggle to solve it
-  themselves. Then wait — once the page advances, take a fresh
-  screenshot and continue.
+  CAPTCHAs, login walls, age gates, geo-blockers, etc.
+- Bot gates you MUST stop on, on first sight, no retries:
+    * Cloudflare "Checking your browser" / Turnstile interstitial
+    * "Verify you are human" / "Are you a robot?" / reCAPTCHA / hCaptcha
+    * "Press and hold" sliders / image-puzzle challenges (e.g. PerimeterX,
+      DataDome, Akamai Bot Manager)
+    * Sign-in walls, age gates, region selectors that won't dismiss
+    * Pages that snap straight to "Access Denied" / 403 / "Suspicious
+      activity detected"
+- The MOMENT a snapshot or screenshot shows any of the above, hand off:
+    1. STOP. Do not click, type, retry, refresh, or navigate elsewhere.
+       Re-clicking the same element burns trust with the bot detector
+       and refreshing usually wipes the user's in-progress solve.
+    2. Ask the user — via AskUserQuestion — to flip the embedded
+       browser's "interact" toggle and clear the gate themselves.
+       Briefly describe what you see ("Cloudflare challenge on
+       printables.com — please solve it in the embedded browser, then
+       reply 'done' here").
+    3. WAIT for their reply before any further browser_* call. Do not
+       poll the page in the meantime.
+    4. After they confirm, take ONE fresh browser_snapshot to verify
+       the page advanced. If it did, continue. If the gate's still
+       there, ask again — don't retry on your own.
+- Login walls follow the same rule: stop, ask, wait. The user can
+  type credentials directly in the embedded browser when "interact" is
+  on; you should never try to autofill credentials yourself.
 """
 
 
@@ -228,13 +285,53 @@ planes, used at different stages of the build:
   - Main profile sketch on its natural plane (the silhouette).
   - One or more SECONDARY sketches for cutouts: cable channels,
     ports, screw bosses, finger reliefs, weight-reduction pockets,
-    drainage slots. These usually live on a DIFFERENT plane from the
-    main profile (often XZ or YZ if main is XY, or an offset plane
-    placed mid-thickness).
+    drainage slots. These MUST be on a plane PERPENDICULAR to the
+    main extrusion direction — see the next section for the rule.
   - Sketches for raised features: bosses, locating ribs, snap-fit
     tabs, brand text, alignment dots. Place these on the face they
     belong on via cq.Plane / .workplane(offset=...) or by selecting a
     face after the main extrude (`wp.faces(">Z").workplane()`).
+
+THE PERPENDICULAR-PLANE RULE (read this carefully — it's the bug
+that keeps producing "extruded drawing" parts):
+
+If you draw your main silhouette on XY and extrude along +Z, then a
+cutout sketch ALSO on XY only adds another shape to the same 2D
+profile — extruding it just gives you another vertical column, not a
+hole or channel through the part. To cut a cable slot or a port THROUGH
+the part, the cutout sketch has to live on a plane whose normal points
+ALONG one of the part's IN-PLANE axes — i.e. perpendicular to the
+extrusion direction.
+
+Concrete rule:
+  - Main extrusion along +Z (sketch on XY)  →  cutouts on XZ or YZ
+    (or an offset plane like `cq.Plane((0,0,h/2), (1,0,0), (0,0,1))`
+    sitting mid-height through the body).
+  - Main extrusion along +Y (sketch on XZ)  →  cutouts on XY or YZ.
+  - Main extrusion along +X (sketch on YZ)  →  cutouts on XY or XZ.
+
+Then in the object script:
+  cutter = sketches["cable-slot"].extrude(<long enough to clear the body>)
+  model  = body.cut(cutter)
+
+ANTI-PATTERN — every sketch on the same plane: if every sketch in the
+project sits on XY (or whatever the main plane is), you're stacking
+2D drawings, not designing in 3D. The result will be a single
+extruded silhouette with extra outline detail and nothing going
+ACROSS it. Stop and rethink which plane each sketch belongs on
+BEFORE writing the object script.
+
+Worked example — a phone stand with a side silhouette + cable slot +
+back-relief pocket:
+  sketches/profile.py        plane = "XZ"                    # the L-shape side view
+  sketches/cable-slot.py     plane = "XY"                    # rounded rect, the slot
+                                                             # cuts ALONG +Y through the base
+  sketches/back-relief.py    plane = ("YZ", offset = depth)  # pocket on the back surface
+Object script:
+  body = sketches["profile"].extrude(width)                  # along +Y
+  body = body.cut(sketches["cable-slot"].extrude(width))     # cuts a channel through the base
+  body = body.cut(sketches["back-relief"].extrude(-3))       # depression on back
+  model = body.edges("|Z").fillet(2.0)                       # finishing
 
 Build the part in PASSES. After each pass, run_model + snapshot, then
 decide what's missing:
@@ -425,7 +522,7 @@ def _build_requirements_section(project: Project) -> str:
     )
 
 
-def _build_system_prompt(project: Project) -> str:
+def _build_system_prompt(project: Project, *, playwright_active: bool) -> str:
     objs = [o["name"] for o in project.list_objects()]
     sketches = [s["name"] for s in project.list_sketches()]
     imports = [i["name"] for i in project.list_imports()]
@@ -441,7 +538,10 @@ def _build_system_prompt(project: Project) -> str:
     s = settings.load()
     if s.sketchfab_enabled and s.sketchfab_token:
         body += SKETCHFAB_PROMPT_BLOCK
-    if s.playwright_enabled:
+    # Only advertise Playwright in the prompt when it actually registered.
+    # Otherwise the agent thinks browser tools are available and gets stuck
+    # searching for them.
+    if playwright_active:
         body += PLAYWRIGHT_PROMPT_BLOCK
     return body
 
@@ -462,11 +562,6 @@ def _make_permission_callback(project: Project, msg_id: str, *,
         tool_input: dict[str, Any],
         context: ToolPermissionContext,
     ):
-        # Lazy Chromium spawn: only when the agent actually reaches
-        # for a browser_* tool. Reserved port is already known.
-        if tool_name.startswith("mcp__playwright__"):
-            await asyncio.to_thread(browser_session.session.ensure_started)
-
         # Always-allow surface: our own CAD tools and the SDK's safe
         # built-ins. Playwright is the surface that may need a prompt.
         if (
@@ -559,27 +654,76 @@ async def _run(project: Project, toolset: CadToolset, prompt: str,
     mcp_servers: dict[str, Any] = {"cad": server}
     allowed_tools = list(ALL_TOOL_NAMES)
     cdp_http: str | None = None
-    if user_settings.playwright_enabled:
-        # We don't spawn Chromium yet — reserving a CDP port lets us hand
-        # @playwright/mcp a stable --cdp-endpoint NOW, while the actual
-        # Chromium process only comes up when (and if) the agent calls
-        # its first browser_* tool. That keeps idle-but-Playwright-enabled
-        # turns from incurring the ~150 MB Chromium tax.
-        if browser_session.session.is_running:
-            cdp_http = browser_session.session.cdp_http_endpoint
-        else:
-            try:
-                browser_session.session.reserve_port()
-                cdp_http = browser_session.session.cdp_http_endpoint
-            except Exception:
-                cdp_http = None
+    playwright_active = user_settings.playwright_enabled
+    if playwright_active:
+        node_ver = _node_version()
+        if node_ver is None:
+            bus.emit("chat_event", {
+                "doc_id": project.id, "msg_id": msg_id,
+                "kind": "text",
+                "text": (
+                    "[playwright disabled] Node.js wasn't found on PATH, so "
+                    "the Playwright MCP server can't start. Install Node "
+                    f"{PW_MIN_NODE[0]}.{PW_MIN_NODE[1]} or newer "
+                    "(https://nodejs.org), then restart the app."
+                ),
+            })
+            playwright_active = False
+        elif node_ver < PW_MIN_NODE:
+            v = ".".join(str(x) for x in node_ver)
+            req = ".".join(str(x) for x in PW_MIN_NODE)
+            bus.emit("chat_event", {
+                "doc_id": project.id, "msg_id": msg_id,
+                "kind": "text",
+                "text": (
+                    f"[playwright disabled] Node.js {v} is too old — "
+                    f"`@playwright/mcp` needs Node {req} or newer "
+                    "(it uses the `with {{ type: 'json' }}` import-attribute "
+                    "syntax, added in 20.10). Upgrade Node "
+                    "(https://nodejs.org), then restart the app."
+                ),
+            })
+            playwright_active = False
+
+    if playwright_active:
+        # Eagerly start Chromium when Playwright is enabled. The original
+        # plan was to defer this to the can_use_tool callback ("only spawn
+        # when the agent first calls a browser tool"), but with
+        # permission_mode="bypassPermissions" the CLI never fires the
+        # callback at all — so MCP would try to connect to the CDP port
+        # before Chromium was up and get ECONNREFUSED. The panel still
+        # only auto-shows when the agent actually navigates somewhere
+        # (the screencast loop suppresses about:blank), so the user
+        # doesn't see anything until there's something worth showing.
+        if not browser_session.session.is_running:
+            await asyncio.to_thread(browser_session.session.ensure_started)
+        cdp_http = browser_session.session.cdp_http_endpoint
 
         pw_args = ["-y", "@playwright/mcp@latest"]
         if cdp_http:
             pw_args.extend(["--cdp-endpoint", cdp_http])
+        else:
+            # Couldn't find / start Chromium — let MCP launch its own;
+            # we just won't get the screencast.
+            bus.emit("chat_event", {
+                "doc_id": project.id, "msg_id": msg_id,
+                "kind": "text",
+                "text": (
+                    "[browser session note] couldn't find Chromium for the "
+                    "embedded preview, so playwright-mcp will launch its own "
+                    "browser without screencast. Install Chrome / Edge or run "
+                    "`npx playwright install chromium` to enable the live view."
+                ),
+            })
+        # Windows: `npx` exists as both a shell script and a `.cmd` batch
+        # file. Subprocess spawn (used by the MCP stdio transport) can
+        # only execute the latter without a shell, so it silently fails
+        # with bare "npx" and the playwright tools never register.
+        # Prefer the absolute path of npx.cmd if we can find one.
+        npx_cmd = shutil.which("npx.cmd") if os.name == "nt" else None
         mcp_servers["playwright"] = {
             "type": "stdio",
-            "command": "npx",
+            "command": npx_cmd or "npx",
             "args": pw_args,
         }
         allowed_tools = list(allowed_tools) + PLAYWRIGHT_TOOL_NAMES
@@ -591,7 +735,7 @@ async def _run(project: Project, toolset: CadToolset, prompt: str,
     # input when can_use_tool is set, so we always wrap the prompt below
     # in that case.
     can_use_tool = None
-    if user_settings.playwright_enabled:
+    if playwright_active:
         can_use_tool = _make_permission_callback(
             project, msg_id,
             require_permission=user_settings.playwright_require_permission,
@@ -601,7 +745,7 @@ async def _run(project: Project, toolset: CadToolset, prompt: str,
         cwd=str(project.path),
         mcp_servers=mcp_servers,
         allowed_tools=allowed_tools,
-        system_prompt=_build_system_prompt(project),
+        system_prompt=_build_system_prompt(project, playwright_active=playwright_active),
         permission_mode="bypassPermissions",
         model=user_settings.model,
         effort=user_settings.effort,  # type: ignore[arg-type]

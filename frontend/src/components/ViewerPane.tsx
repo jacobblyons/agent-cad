@@ -8,6 +8,8 @@ import {
   Grid,
   Html,
   OrbitControls,
+  OrthographicCamera,
+  PerspectiveCamera,
 } from "@react-three/drei";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import * as THREE from "three";
@@ -27,15 +29,21 @@ import { useChat, type EntityKind } from "@/lib/chat";
 import {
   useViewer,
   type EdgeMeta,
+  type SketchDimension,
   type SketchGeometry,
   type Topology,
   type VertexMeta,
 } from "@/lib/viewer";
 import { cn } from "@/lib/utils";
+import { formatLength, setUnit, useUnit, type Unit } from "@/lib/units";
 import { DrawingDialog } from "./DrawingDialog";
 
 type ViewMode = "shaded" | "unshaded" | "wireframe";
 type ToolMode = "orbit" | "annotate";
+type CameraMode = "perspective" | "orthographic";
+
+const PERSP_FOV = 35;
+const PERSP_DEFAULT_POS: [number, number, number] = [60, 50, 80];
 
 const VIEW_OPTIONS: { id: ViewMode; label: string; Icon: typeof Box }[] = [
   { id: "shaded", label: "Shaded", Icon: Box },
@@ -134,6 +142,16 @@ function FacesGroup({
       "",
       (gltf) => {
         if (cancelled) return;
+        // Defensive: tessellate.py emits per-vertex normals, but if a glb
+        // ever lands here without them (older cache, third-party file),
+        // PBR shading would render the surface fully black. Compute on
+        // load so the viewer never silently shows an unlit body.
+        gltf.scene.traverse((obj) => {
+          const mesh = obj as THREE.Mesh;
+          if (mesh.isMesh && !mesh.geometry.attributes.normal) {
+            mesh.geometry.computeVertexNormals();
+          }
+        });
         const r = new THREE.Group();
         gltf.scene.rotation.x = -Math.PI / 2;
         r.add(gltf.scene);
@@ -160,15 +178,19 @@ function FacesGroup({
         case "shaded":
           mesh.material = new THREE.MeshStandardMaterial({
             color: bodyColor,
-            metalness: 0.18,
-            roughness: 0.42,
-            envMapIntensity: 0.7,
+            metalness: 0.05,
+            roughness: 0.55,
+            envMapIntensity: 0.45,
           });
           mesh.castShadow = true;
           mesh.receiveShadow = true;
           break;
         case "unshaded":
-          mesh.material = new THREE.MeshBasicMaterial({ color: bodyColor });
+          // Lambert (pure diffuse) instead of MeshBasic so curvature still
+          // reads — but no specular and no env reflection, so it stays
+          // visually distinct from shaded mode: a matte clay look that
+          // emphasizes form over material.
+          mesh.material = new THREE.MeshLambertMaterial({ color: bodyColor });
           mesh.castShadow = false;
           mesh.receiveShadow = false;
           break;
@@ -361,6 +383,7 @@ function PendingPin({
 }) {
   const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
+  const unit = useUnit();
   useEffect(() => {
     setTimeout(() => ref.current?.focus(), 50);
   }, []);
@@ -372,7 +395,7 @@ function PendingPin({
       >
         <div className="mb-1 flex items-center justify-between">
           <span className="font-mono text-[10px] text-[var(--color-muted)]">
-            {kind} {index ?? "?"} · ({point.map((n) => n.toFixed(1)).join(", ")})
+            {kind} {index ?? "?"} · ({point.map((n) => formatLength(n, unit)).join(", ")})
           </span>
           <button
             onClick={onCancel}
@@ -418,9 +441,72 @@ function PendingPin({
   );
 }
 
+function UnitsToggle() {
+  // A two-button segmented toggle. Click the unit you want — the
+  // other button picks up the muted style. Persisted via the units
+  // module so it survives reloads.
+  const unit = useUnit();
+  const opts: { id: Unit; label: string }[] = [
+    { id: "mm", label: "mm" },
+    { id: "in", label: "in" },
+  ];
+  return (
+    <div className="flex gap-0.5" title="Display units">
+      {opts.map((o) => (
+        <button
+          key={o.id}
+          onClick={() => setUnit(o.id)}
+          className={cn(
+            "flex h-7 min-w-[28px] items-center justify-center rounded-sm px-1.5 font-mono text-[11px]",
+            unit === o.id
+              ? "bg-[var(--color-selection)] text-[var(--color-text)]"
+              : "text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-text)]",
+          )}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function CameraModeToggle({
+  mode,
+  onMode,
+}: {
+  mode: CameraMode;
+  onMode: (m: CameraMode) => void;
+}) {
+  const opts: { id: CameraMode; label: string; tip: string }[] = [
+    { id: "perspective", label: "Persp", tip: "Perspective camera (depth + foreshortening)" },
+    { id: "orthographic", label: "Ortho", tip: "Orthographic camera (parallel projection — easier to compare dimensions)" },
+  ];
+  return (
+    <div className="flex gap-0.5">
+      {opts.map((o) => (
+        <button
+          key={o.id}
+          onClick={() => onMode(o.id)}
+          title={o.tip}
+          className={cn(
+            "flex h-7 items-center justify-center rounded-sm px-2 text-[11px]",
+            mode === o.id
+              ? "bg-[var(--color-selection)] text-[var(--color-text)]"
+              : "text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-text)]",
+          )}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function ViewerToolbar({
   view,
   onView,
+  cameraMode,
+  onCameraMode,
   tool,
   onTool,
   pickKind,
@@ -429,6 +515,8 @@ function ViewerToolbar({
 }: {
   view: ViewMode;
   onView: (m: ViewMode) => void;
+  cameraMode: CameraMode;
+  onCameraMode: (m: CameraMode) => void;
   tool: ToolMode;
   onTool: (m: ToolMode) => void;
   pickKind: EntityKind;
@@ -455,6 +543,8 @@ function ViewerToolbar({
           </button>
         ))}
         <div className="mx-0.5 my-1 w-px bg-[var(--color-border)]" />
+        <CameraModeToggle mode={cameraMode} onMode={onCameraMode} />
+        <div className="mx-0.5 my-1 w-px bg-[var(--color-border)]" />
         <button
           onClick={() => onTool(tool === "annotate" ? "orbit" : "annotate")}
           title="Click a face / edge / vertex to send a pinned message"
@@ -476,6 +566,8 @@ function ViewerToolbar({
           <Camera size={12} />
           <span>Snapshot</span>
         </button>
+        <div className="mx-0.5 my-1 w-px bg-[var(--color-border)]" />
+        <UnitsToggle />
       </div>
       {tool === "annotate" && (
         <div className="flex gap-0.5 rounded-md border border-[var(--color-border)] bg-[var(--color-panel-2)]/90 p-0.5 backdrop-blur">
@@ -570,6 +662,73 @@ function SketchPolyline({
   );
 }
 
+function fmtDimension(d: SketchDimension, unit: Unit): string {
+  // Backend ships millimetres; formatLength converts on display. Radii
+  // get an "R" prefix; lengths render bare (with an inch mark in `in`
+  // mode), matching CAD conventions.
+  const text = formatLength(d.value, unit);
+  return d.kind === "radius" ? `R${text}` : text;
+}
+
+/** Group dimensions whose anchors land within `tol` mm of each other.
+ * Concentric circles (and other coincident features) would otherwise
+ * stack overlapping labels in screen space — only the topmost would be
+ * legible. Clustered groups render as a single multi-line label. */
+function clusterDimensions(
+  dims: SketchDimension[],
+  tol = 0.5,
+): SketchDimension[][] {
+  const clusters: SketchDimension[][] = [];
+  const t2 = tol * tol;
+  for (const d of dims) {
+    let placed = false;
+    for (const c of clusters) {
+      const ref = c[0].anchor;
+      const dx = d.anchor[0] - ref[0];
+      const dy = d.anchor[1] - ref[1];
+      const dz = d.anchor[2] - ref[2];
+      if (dx * dx + dy * dy + dz * dz <= t2) {
+        c.push(d);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) clusters.push([d]);
+  }
+  return clusters;
+}
+
+/**
+ * Floating measurement labels for a sketch's edges. Only rendered for the
+ * active sketch — showing every length on every visible sketch at once
+ * turns the viewport into alphabet soup. The labels live in the same
+ * CQ-coords group as the polylines so anchors transform identically.
+ */
+function SketchDimensions({ dimensions }: { dimensions: SketchDimension[] }) {
+  const unit = useUnit();
+  const clusters = useMemo(() => clusterDimensions(dimensions), [dimensions]);
+  if (clusters.length === 0) return null;
+  return (
+    <>
+      {clusters.map((c, i) => (
+        <Html
+          key={i}
+          position={c[0].anchor}
+          center
+          zIndexRange={[40, 0]}
+          style={{ pointerEvents: "none" }}
+        >
+          <div className="flex flex-col items-center gap-px rounded-sm bg-[rgba(0,0,0,0.55)] px-1 py-px font-mono text-[10px] leading-none text-[#fbbf24] whitespace-nowrap select-none">
+            {c.map((d, j) => (
+              <div key={j}>{fmtDimension(d, unit)}</div>
+            ))}
+          </div>
+        </Html>
+      ))}
+    </>
+  );
+}
+
 function SketchOverlay({
   sketches,
   activeSketch,
@@ -584,12 +743,15 @@ function SketchOverlay({
       {sketches.map((s) => {
         const polylines = s.geometry.polylines ?? [];
         if (polylines.length === 0) return null;
-        const color = s.name === activeSketch ? SKETCH_COLOR_ACTIVE : SKETCH_COLOR;
+        const isActive = s.name === activeSketch;
+        const color = isActive ? SKETCH_COLOR_ACTIVE : SKETCH_COLOR;
+        const dims = isActive ? s.geometry.dimensions ?? [] : [];
         return (
           <group key={s.name}>
             {polylines.map((p, i) => (
               <SketchPolyline key={i} polyline={p} color={color} />
             ))}
+            <SketchDimensions dimensions={dims} />
           </group>
         );
       })}
@@ -617,9 +779,28 @@ type CameraSnap = {
   up: [number, number, number];
 };
 
-/** Mirrors live camera + orbit-target state into a ref readable from outside Canvas. */
-function CameraTracker({ outRef }: { outRef: React.MutableRefObject<CameraSnap | null> }) {
-  const { camera, controls } = useThree();
+/** Three.js-coords copy of the live camera state, plus the inferred ortho
+ * zoom that would produce the same framing as the current perspective
+ * view. Used by CameraRig to mount a replacement camera at the user's
+ * current view when toggling perspective ↔ orthographic. */
+type ThreeCamSnap = {
+  position: [number, number, number];
+  target: [number, number, number];
+  orthoZoom: number;
+};
+
+/** Mirrors live camera + orbit-target state into refs readable from
+ * outside Canvas. `outRef` carries CADQuery coords for the snapshot
+ * tool; `threeRef` carries three.js-coords + a derived ortho zoom for
+ * camera-mode switching inside the same Canvas. */
+function CameraTracker({
+  outRef,
+  threeRef,
+}: {
+  outRef: React.MutableRefObject<CameraSnap | null>;
+  threeRef: React.MutableRefObject<ThreeCamSnap>;
+}) {
+  const { camera, controls, size } = useThree();
   useFrame(() => {
     const t = (controls as unknown as { target?: THREE.Vector3 } | null)?.target;
     outRef.current = {
@@ -627,8 +808,63 @@ function CameraTracker({ outRef }: { outRef: React.MutableRefObject<CameraSnap |
       target: t ? threeToCq(t) : [0, 0, 0],
       up: threeToCq(camera.up),
     };
+    threeRef.current.position = camera.position.toArray() as [number, number, number];
+    threeRef.current.target = t
+      ? (t.toArray() as [number, number, number])
+      : [0, 0, 0];
+    // Only update ortho zoom from the perspective camera — when ortho is
+    // active, its own zoom is what we want to preserve, so leave the ref.
+    if ((camera as THREE.PerspectiveCamera).isPerspectiveCamera && t) {
+      const dist = camera.position.distanceTo(t);
+      const fovRad = ((camera as THREE.PerspectiveCamera).fov * Math.PI) / 180;
+      const visibleH = 2 * dist * Math.tan(fovRad / 2);
+      if (visibleH > 1e-3) {
+        threeRef.current.orthoZoom = size.height / visibleH;
+      }
+    }
   });
   return null;
+}
+
+/** Conditionally mounts a perspective or orthographic camera as the
+ * scene default. Reads the latest tracked position/target/zoom from a
+ * ref so toggling preserves the user's view: the new camera mounts
+ * where the old one was, and OrbitControls keeps the same orbit target.
+ *
+ * The `key={mode}` forces drei to fully tear down + remount the camera
+ * component when the mode flips, otherwise drei tries to mutate one
+ * camera type into the other and OrbitControls can latch onto a stale
+ * frustum. */
+function CameraRig({
+  mode,
+  snapRef,
+}: {
+  mode: CameraMode;
+  snapRef: React.MutableRefObject<ThreeCamSnap>;
+}) {
+  const snap = snapRef.current;
+  if (mode === "orthographic") {
+    return (
+      <OrthographicCamera
+        key="ortho"
+        makeDefault
+        position={snap.position}
+        zoom={snap.orthoZoom}
+        near={0.1}
+        far={5000}
+      />
+    );
+  }
+  return (
+    <PerspectiveCamera
+      key="persp"
+      makeDefault
+      position={snap.position}
+      fov={PERSP_FOV}
+      near={0.1}
+      far={5000}
+    />
+  );
 }
 
 function fmtArr(v: [number, number, number]): string {
@@ -644,12 +880,25 @@ export function ViewerPane() {
   const activeSketch = doc?.active_sketch ?? null;
   const wrapperRef = useRef<HTMLDivElement>(null);
   const cameraRef = useRef<CameraSnap | null>(null);
+  // Three.js-coords mirror of the live camera, plus a derived ortho zoom.
+  // Initialised to the same default the perspective camera mounts at so
+  // first render of CameraRig produces the documented default view.
+  const threeCamRef = useRef<ThreeCamSnap>({
+    position: PERSP_DEFAULT_POS,
+    target: [0, 0, 0],
+    orthoZoom: 10,
+  });
   const [snapshot, setSnapshot] = useState<
     { data: string; description: string } | null
   >(null);
 
   const [viewMode, setViewMode] = useState<ViewMode>(
     () => (localStorage.getItem("agentcad:viewMode") as ViewMode) || "shaded",
+  );
+  const [cameraMode, setCameraMode] = useState<CameraMode>(
+    () =>
+      (localStorage.getItem("agentcad:cameraMode") as CameraMode) ||
+      "perspective",
   );
   const [toolMode, setToolMode] = useState<ToolMode>("orbit");
   const [pickKind, setPickKind] = useState<EntityKind>("face");
@@ -664,6 +913,10 @@ export function ViewerPane() {
   useEffect(() => {
     localStorage.setItem("agentcad:viewMode", viewMode);
   }, [viewMode]);
+
+  useEffect(() => {
+    localStorage.setItem("agentcad:cameraMode", cameraMode);
+  }, [cameraMode]);
 
   useEffect(() => {
     setToolMode("orbit");
@@ -768,7 +1021,6 @@ export function ViewerPane() {
       <Canvas
         shadows
         dpr={[1, 2]}
-        camera={{ position: [60, 50, 80], fov: 35, near: 0.1, far: 5000 }}
         gl={{ antialias: true, preserveDrawingBuffer: true }}
         raycaster={{
           params: {
@@ -781,28 +1033,41 @@ export function ViewerPane() {
         }}
       >
         <CursorTracker enabled={toolMode === "annotate"} />
-        <CameraTracker outRef={cameraRef} />
+        <CameraRig mode={cameraMode} snapRef={threeCamRef} />
+        <CameraTracker outRef={cameraRef} threeRef={threeCamRef} />
         <color attach="background" args={["#1e1e1e"]} />
 
-        <ambientLight intensity={viewMode === "shaded" ? 0.18 : 0.0} />
+        {/* Light intensities are deliberately gentle: the GLB now ships
+            with per-vertex normals (see backend/app/cad/tessellate.py),
+            so PBR shading actually works. The previous (hot) intensities
+            were tuned around an unlit black body and now blow the surface
+            to near-white, which hides the same curvature we wanted to
+            reveal. These levels keep midtones readable while still
+            producing a clear top-bright / side-darker gradient.
+            Lights stay on for both shaded and unshaded — only wireframe
+            (where the body is hidden anyway) turns them off. */}
+        <ambientLight intensity={viewMode === "wireframe" ? 0.0 : 0.08} />
         <directionalLight
           position={[40, 80, 60]}
-          intensity={viewMode === "shaded" ? 1.5 : 0.0}
+          intensity={viewMode === "wireframe" ? 0.0 : 0.7}
           castShadow={viewMode === "shaded"}
           shadow-mapSize={[2048, 2048]}
           shadow-bias={-0.0005}
         />
         <directionalLight
           position={[-50, 40, -30]}
-          intensity={viewMode === "shaded" ? 0.55 : 0.0}
+          intensity={viewMode === "wireframe" ? 0.0 : 0.25}
         />
         <directionalLight
           position={[20, -40, -60]}
-          intensity={viewMode === "shaded" ? 0.35 : 0.0}
+          intensity={viewMode === "wireframe" ? 0.0 : 0.15}
         />
+        {/* Environment map only contributes to PBR (StandardMaterial) —
+            Lambert ignores it. Keep it scoped to shaded mode so we don't
+            pay the PMREM cost when nothing samples it. */}
         <Suspense fallback={null}>
           {viewMode === "shaded" && (
-            <Environment preset="city" environmentIntensity={0.5} />
+            <Environment preset="city" environmentIntensity={0.25} />
           )}
         </Suspense>
 
@@ -917,6 +1182,8 @@ export function ViewerPane() {
       <ViewerToolbar
         view={viewMode}
         onView={setViewMode}
+        cameraMode={cameraMode}
+        onCameraMode={setCameraMode}
         tool={toolMode}
         onTool={setToolMode}
         pickKind={pickKind}
