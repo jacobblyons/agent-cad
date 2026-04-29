@@ -1,7 +1,8 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
   Boxes,
+  Camera,
   Loader2,
   Printer as PrinterIcon,
   RefreshCw,
@@ -9,15 +10,22 @@ import {
   Send,
   Settings as SettingsIcon,
   Sparkles,
+  Thermometer,
   Trash2,
   TriangleAlert,
 } from "lucide-react";
+import { call } from "@/lib/pywebview";
 import {
   fmtGrams,
   fmtMinutes,
   type SliceOverride,
   usePrint,
 } from "@/lib/print";
+
+function fmtTemp(t: number | null | undefined): string {
+  if (t == null) return "—";
+  return `${t.toFixed(0)}°`;
+}
 import { useUi } from "@/lib/ui";
 import { cn } from "@/lib/utils";
 
@@ -50,11 +58,54 @@ export function PrintPane() {
     setOverrides,
     slice,
     send,
+    refreshPrinterState,
   } = usePrint();
 
   const slice_ = session?.last_slice ?? null;
   const overrides = session?.overrides ?? [];
   const printerState = session?.printer_state ?? null;
+
+  // Snapshot lives on the front-end only — backend doesn't cache the
+  // JPEG. Camera fetch returns the path to a temp file; we read it as
+  // a data URL once and hold it in component state until the next
+  // capture or phase exit.
+  const [snapshotDataUrl, setSnapshotDataUrl] = useState<string | null>(null);
+  const [snapshotErr, setSnapshotErr] = useState<string | null>(null);
+  const [snapshotBusy, setSnapshotBusy] = useState(false);
+  const grabSnapshot = async () => {
+    if (snapshotBusy) return;
+    setSnapshotBusy(true);
+    setSnapshotErr(null);
+    try {
+      const r = await call<{ ok: boolean; data_url?: string; error?: string }>(
+        "print_camera_snapshot",
+        session?.project_id ?? null,
+      );
+      if (r?.ok && r.data_url) {
+        setSnapshotDataUrl(r.data_url);
+      } else {
+        setSnapshotErr(r?.error ?? "snapshot failed");
+      }
+    } finally {
+      setSnapshotBusy(false);
+    }
+  };
+  // Auto-poll progress + auto-take a snapshot every minute while the
+  // printer reports an active job. Cheap (one MQTT round-trip + one
+  // RTSPS frame) and gives the user a near-live view without them
+  // having to click Refresh.
+  useEffect(() => {
+    if (!printerState?.online) return;
+    if (printerState.gcode_state !== "RUNNING") return;
+    const id = setInterval(() => {
+      void refreshPrinterState();
+    }, 30_000);
+    return () => clearInterval(id);
+    // We deliberately depend only on the bits that determine whether
+    // we should poll, not the full printerState object, to avoid
+    // resetting the interval every report.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [printerState?.online, printerState?.gcode_state]);
 
   const printer = useMemo(
     () => printers.find((p) => p.id === session?.printer_id) ?? null,
@@ -173,7 +224,7 @@ export function PrintPane() {
                 Live from printer
               </h2>
               <button
-                onClick={usePrint().refreshPrinterState}
+                onClick={refreshPrinterState}
                 disabled={busy}
                 title="Re-query the printer over MQTT"
                 className="flex h-7 items-center gap-1.5 rounded-sm border border-[var(--color-border)] px-2.5 text-[11px] hover:bg-[var(--color-hover)] disabled:opacity-50"
@@ -264,6 +315,126 @@ export function PrintPane() {
                     )}
                   </div>
                 </div>
+              </div>
+            )}
+          </section>
+
+          {/* now printing — only renders when there's an active job */}
+          {printerState?.online && printerState.gcode_state === "RUNNING" && (
+            <section>
+              <div className="mb-2 flex items-center justify-between">
+                <h2 className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[var(--color-muted)]">
+                  <Thermometer size={11} />
+                  Now printing
+                </h2>
+              </div>
+              <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-panel)] p-4 space-y-3">
+                {/* progress bar + numbers */}
+                <div>
+                  <div className="mb-1 flex items-center justify-between text-xs">
+                    <span className="truncate text-[var(--color-muted)]">
+                      {printerState.print_filename || "(unnamed)"}
+                    </span>
+                    <span className="ml-2 font-mono tabular-nums text-[var(--color-text)]">
+                      {printerState.progress_pct ?? 0}%
+                    </span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-sm bg-[var(--color-hover)]">
+                    <div
+                      className="h-full bg-[var(--color-accent)] transition-all"
+                      style={{
+                        width: `${Math.max(0, Math.min(100, printerState.progress_pct ?? 0))}%`,
+                      }}
+                    />
+                  </div>
+                  <div className="mt-1 flex justify-between text-[11px] text-[var(--color-muted)]">
+                    <span>
+                      {printerState.layer_num != null && printerState.total_layer_num
+                        ? `layer ${printerState.layer_num} / ${printerState.total_layer_num}`
+                        : ""}
+                    </span>
+                    <span>
+                      {printerState.time_remaining_min != null
+                        ? `${
+                            Math.floor(printerState.time_remaining_min / 60)
+                          }h ${printerState.time_remaining_min % 60}m left`
+                        : ""}
+                    </span>
+                  </div>
+                </div>
+                {/* temps */}
+                <div className="grid grid-cols-3 gap-3 text-center">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-[var(--color-muted)]">
+                      Nozzle
+                    </div>
+                    <div className="font-mono text-sm text-[var(--color-text)]">
+                      {fmtTemp(printerState.nozzle_c)} /{" "}
+                      <span className="text-[var(--color-muted)]">
+                        {fmtTemp(printerState.nozzle_target_c)}
+                      </span>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-[var(--color-muted)]">
+                      Bed
+                    </div>
+                    <div className="font-mono text-sm text-[var(--color-text)]">
+                      {fmtTemp(printerState.bed_c)} /{" "}
+                      <span className="text-[var(--color-muted)]">
+                        {fmtTemp(printerState.bed_target_c)}
+                      </span>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-[var(--color-muted)]">
+                      Chamber
+                    </div>
+                    <div className="font-mono text-sm text-[var(--color-text)]">
+                      {fmtTemp(printerState.chamber_c)}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* camera frame */}
+          <section>
+            <div className="mb-2 flex items-center justify-between">
+              <h2 className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[var(--color-muted)]">
+                <Camera size={11} />
+                Camera
+              </h2>
+              <button
+                onClick={grabSnapshot}
+                disabled={snapshotBusy || !printer?.has_access_code}
+                title="Grab one frame from the printer's chamber camera"
+                className="flex h-7 items-center gap-1.5 rounded-sm border border-[var(--color-border)] px-2.5 text-[11px] hover:bg-[var(--color-hover)] disabled:opacity-50"
+              >
+                {snapshotBusy ? (
+                  <Loader2 size={11} className="animate-spin" />
+                ) : (
+                  <Camera size={11} />
+                )}
+                <span>{snapshotDataUrl ? "Refresh" : "Capture"}</span>
+              </button>
+            </div>
+            {snapshotErr ? (
+              <div className="rounded-md border border-[#f48771] bg-[#3a1d1d] p-3 text-xs text-[#f48771]">
+                {snapshotErr}
+              </div>
+            ) : snapshotDataUrl ? (
+              <img
+                src={snapshotDataUrl}
+                alt="Printer camera"
+                className="w-full rounded-md border border-[var(--color-border)]"
+              />
+            ) : (
+              <div className="rounded-md border border-dashed border-[var(--color-border)] px-4 py-6 text-center text-xs text-[var(--color-muted)]">
+                {snapshotBusy
+                  ? "Grabbing camera frame…"
+                  : "Click Capture to pull one frame from the printer's chamber camera."}
               </div>
             )}
           </section>

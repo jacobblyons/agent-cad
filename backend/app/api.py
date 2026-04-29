@@ -901,6 +901,43 @@ class JsApi:
         status = printer.status().to_json() if ok else None
         return {"ok": ok, "message": why, "status": status}
 
+    def print_camera_snapshot(self, project_id: str | None = None) -> dict:
+        """Grab one JPEG frame from the configured printer's chamber
+        camera. Returns a `data_url` the UI can stick straight into an
+        <img> tag — keeps the bytes on the front-end so the backend
+        doesn't have to cache them. project_id is optional; without
+        it we use the print phase's selected printer if any, otherwise
+        the user's default printer."""
+        import base64
+        s = settings.load()
+        printer_id: str | None = None
+        if project_id:
+            session = self._print_phase.get(project_id)
+            if session and session.printer_id:
+                printer_id = session.printer_id
+        printer_id = printer_id or s.default_printer_id or (
+            s.printers[0].get("id") if s.printers else None
+        )
+        if not printer_id:
+            return {"ok": False, "error": "no printer configured"}
+        cfg = next((p for p in s.printers if p.get("id") == printer_id), None)
+        if cfg is None:
+            return {"ok": False, "error": f"unknown printer {printer_id!r}"}
+        try:
+            printer = build_printer(cfg.get("kind", "bambu_x1c"), cfg)
+        except Exception as e:
+            return {"ok": False, "error": f"printer config invalid: {e}"}
+        try:
+            data = printer.camera_snapshot(timeout=15.0)
+        except RuntimeError as e:
+            return {"ok": False, "error": str(e)}
+        b64 = base64.b64encode(data).decode("ascii")
+        return {
+            "ok": True,
+            "data_url": f"data:image/jpeg;base64,{b64}",
+            "size_bytes": len(data),
+        }
+
     def slicer_diagnose(self) -> dict:
         """Return whether the slicer CLI is available + the path we'd use."""
         s = settings.load()

@@ -1450,16 +1450,118 @@ def build_print_tools(toolset: "PrintToolset") -> list[Any]:
 
     @tool(
         "print_status",
-        "Report the current print-phase state — selected printer, preset, overrides, last slice estimate, and last send result. Call when you want to check what's set without changing anything.",
+        "Report the current print-phase state plus a one-line live summary of what the printer's actually doing right now (idle / printing N% / paused / error). Use this to check whether the model has been sliced, what the last send result was, and — once you've sent a job — whether the printer is actually running. Triggers a fresh MQTT query so the numbers are current. No args.",
         {},
     )
     async def print_status(args):
-        r = toolset.api.print_phase_get(toolset.project.id)
-        return _ok(json.dumps(r, indent=2, default=str))
+        proj_id = toolset.project.id
+        # Refresh the live snapshot so progress / temps are current.
+        # Errors here are non-fatal — the call still returns whatever
+        # session info we have.
+        try:
+            toolset.api.print_query_printer_state(proj_id)
+        except Exception:
+            pass
+        r = toolset.api.print_phase_get(proj_id)
+        session = r.get("session") or {}
+        ps = session.get("printer_state") or {}
+        # Build a human-friendly summary at the top, full JSON below.
+        summary_parts: list[str] = []
+        if ps.get("online"):
+            # Replicate PrinterState.short_status_line from the dict so
+            # we don't have to round-trip through the dataclass.
+            gcode = (ps.get("gcode_state") or "").upper()
+            if gcode == "RUNNING":
+                bits = []
+                if ps.get("progress_pct") is not None:
+                    bits.append(f"{ps['progress_pct']}%")
+                if ps.get("layer_num") and ps.get("total_layer_num"):
+                    bits.append(f"layer {ps['layer_num']}/{ps['total_layer_num']}")
+                if ps.get("time_remaining_min") is not None:
+                    h, m = divmod(int(ps["time_remaining_min"]), 60)
+                    bits.append(f"{h}h{m:02d}m left" if h else f"{m}m left")
+                file_part = f" ({ps.get('print_filename')})" if ps.get('print_filename') else ""
+                summary_parts.append(f"PRINTER STATE: printing{file_part} — {', '.join(bits) or 'in progress'}")
+            elif gcode == "PAUSE":
+                summary_parts.append("PRINTER STATE: paused")
+            elif gcode == "FINISH":
+                summary_parts.append("PRINTER STATE: finished")
+            elif gcode == "FAILED":
+                summary_parts.append("PRINTER STATE: last print failed")
+            else:
+                summary_parts.append("PRINTER STATE: idle")
+            if ps.get("nozzle_c") is not None:
+                summary_parts.append(
+                    f"  nozzle {ps.get('nozzle_c'):.0f}/{(ps.get('nozzle_target_c') or 0):.0f}C, "
+                    f"bed {(ps.get('bed_c') or 0):.0f}/{(ps.get('bed_target_c') or 0):.0f}C"
+                )
+            active = next(
+                (s for s in (ps.get("slots") or []) if s.get("tray_id") == ps.get("active_tray")),
+                (ps.get("slots") or [{}])[0] if ps.get("slots") else {},
+            )
+            if active and active.get("type"):
+                summary_parts.append(
+                    f"  filament: {active.get('type')} "
+                    f"({active.get('sub_brand') or active.get('tray_info_idx') or 'unknown'})"
+                )
+        elif ps.get("error"):
+            summary_parts.append(f"PRINTER STATE: offline — {ps.get('error')}")
+        elif ps:
+            summary_parts.append("PRINTER STATE: query attempted, no data")
+        else:
+            summary_parts.append("PRINTER STATE: not yet queried (call again to retry)")
+        summary = "\n".join(summary_parts) + "\n\nfull state:\n"
+        return _ok(summary + json.dumps(r, indent=2, default=str))
+
+    @tool(
+        "printer_snapshot",
+        "Grab a single JPEG frame from the printer's onboard chamber camera and return it as an image you can SEE. Use this any time the user wants visual confirmation: 'is the print going ok', 'show me the bed', 'did the first layer go down right', after sending a job to verify it actually started, or mid-print to spot stringing / detached parts / clogged nozzle. Returns the live frame and a one-line status summary.",
+        {},
+    )
+    async def printer_snapshot(args):
+        # Look up the printer that's selected for this print phase.
+        proj_id = toolset.project.id
+        cur = toolset.api.print_phase_get(proj_id)
+        session = cur.get("session") or {}
+        printer_id = session.get("printer_id")
+        if not printer_id:
+            return _err("no printer selected for this print phase")
+        # Reach into settings → printer config so we can build a driver.
+        from .. import settings as _s, printing as _printing  # noqa: PLC0415
+        s = _s.load()
+        cfg = next((p for p in s.printers if p.get("id") == printer_id), None)
+        if cfg is None:
+            return _err(f"printer {printer_id!r} no longer configured")
+        try:
+            printer = _printing.build_printer(cfg.get("kind", "bambu_x1c"), cfg)
+        except Exception as e:
+            return _err(f"could not initialise printer: {e}")
+        try:
+            png_or_jpg = printer.camera_snapshot(timeout=15.0)
+        except RuntimeError as e:
+            return _err(str(e))
+        # Pull the live state alongside the image so the agent gets
+        # everything in one round-trip.
+        try:
+            state = printer.get_state(timeout=4.0)
+            label = state.short_status_line()
+        except Exception as e:
+            label = f"(state query failed: {e})"
+        return {
+            "content": [
+                {"type": "text", "text": f"camera frame from {cfg.get('name', printer_id)} — {label}"},
+                {
+                    "type": "image",
+                    "data": base64.b64encode(png_or_jpg).decode("ascii"),
+                    "mimeType": "image/jpeg",
+                },
+            ],
+        }
 
     return [
         slice_for_print, set_print_preset, add_print_override,
         clear_print_overrides, send_to_printer, print_status,
+        printer_snapshot,
     ]
 
 
@@ -1470,6 +1572,7 @@ PRINT_TOOL_NAMES = [
     "mcp__cad__clear_print_overrides",
     "mcp__cad__send_to_printer",
     "mcp__cad__print_status",
+    "mcp__cad__printer_snapshot",
 ]
 
 

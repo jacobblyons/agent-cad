@@ -39,6 +39,18 @@ export type PrinterState = {
   slots: FilamentSlot[];
   nozzle_diameter_mm: number | null;
   nozzle_type: string;
+  // Live print job
+  gcode_state: string;         // "IDLE" / "RUNNING" / "PAUSE" / "FINISH" / "FAILED"
+  print_filename: string;
+  progress_pct: number | null;
+  layer_num: number | null;
+  total_layer_num: number | null;
+  time_remaining_min: number | null;
+  nozzle_c: number | null;
+  nozzle_target_c: number | null;
+  bed_c: number | null;
+  bed_target_c: number | null;
+  chamber_c: number | null;
   error: string;
 };
 

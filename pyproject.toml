@@ -15,6 +15,10 @@ dependencies = [
     # paho-mqtt is the protocol the Bambu printer's LAN-mode "start
     # print" command rides on. Tiny, BSD-licensed, no transitive deps.
     "paho-mqtt>=2.1",
+    # imageio-ffmpeg ships a self-contained ffmpeg binary (per-platform,
+    # ~30 MB) so the printer-snapshot CLI can grab a frame off the
+    # printer's RTSPS camera stream without requiring a system ffmpeg.
+    "imageio-ffmpeg>=0.5",
 ]
 
 [project.optional-dependencies]

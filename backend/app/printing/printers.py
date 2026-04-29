@@ -17,6 +17,7 @@ import ftplib
 import json
 import socket
 import ssl
+import subprocess
 import threading
 import time
 import uuid
@@ -86,6 +87,18 @@ class PrinterState:
     slots: list[FilamentSlot] = field(default_factory=list)
     nozzle_diameter_mm: float | None = None
     nozzle_type: str = ""        # "stainless_steel" / "hardened_steel" / ...
+    # --- live print job status (populated when actively printing) ----
+    gcode_state: str = ""              # "IDLE" / "RUNNING" / "PAUSE" / "FINISH" / "FAILED"
+    print_filename: str = ""           # subtask_name reported by printer
+    progress_pct: int | None = None    # mc_percent: 0..100
+    layer_num: int | None = None       # current layer (1-indexed)
+    total_layer_num: int | None = None
+    time_remaining_min: int | None = None  # mc_remaining_time
+    nozzle_c: float | None = None
+    nozzle_target_c: float | None = None
+    bed_c: float | None = None
+    bed_target_c: float | None = None
+    chamber_c: float | None = None
     error: str = ""              # If the query failed, what went wrong
 
     def to_json(self) -> dict:
@@ -93,6 +106,34 @@ class PrinterState:
             **asdict(self),
             "slots": [s.to_json() for s in self.slots],
         }
+
+    def is_printing(self) -> bool:
+        """True iff the printer reports an active print job."""
+        return self.gcode_state.upper() in ("RUNNING", "PAUSE", "PREPARE")
+
+    def short_status_line(self) -> str:
+        """One-liner the agent / UI can render — describes the current
+        printer state in plain language."""
+        if not self.online:
+            return f"offline: {self.error or 'unreachable'}"
+        if self.gcode_state == "RUNNING":
+            bits: list[str] = []
+            if self.progress_pct is not None:
+                bits.append(f"{self.progress_pct}%")
+            if self.layer_num is not None and self.total_layer_num:
+                bits.append(f"layer {self.layer_num}/{self.total_layer_num}")
+            if self.time_remaining_min is not None:
+                h, m = divmod(self.time_remaining_min, 60)
+                bits.append(f"{h}h{m:02d}m left" if h else f"{m}m left")
+            file_part = f" — {self.print_filename}" if self.print_filename else ""
+            return f"printing{file_part}: {', '.join(bits) if bits else 'in progress'}"
+        if self.gcode_state == "PAUSE":
+            return f"paused at {self.progress_pct}%" if self.progress_pct else "paused"
+        if self.gcode_state == "FINISH":
+            return f"finished: {self.print_filename}" if self.print_filename else "finished"
+        if self.gcode_state == "FAILED":
+            return "last print failed"
+        return "idle"
 
     def active_slot(self) -> FilamentSlot | None:
         """The AMS slot currently feeding the nozzle, or None if no
@@ -293,6 +334,84 @@ class BambuLabPrinter(Printer):
             ),
         )
 
+    # -------- camera snapshot (RTSPS) ---------------------------------
+
+    def fetch_snapshot(
+        self, out_path: Path, *, timeout: float = 15.0,
+    ) -> tuple[bool, str]:
+        """Capture a single JPEG frame from the printer's chamber camera.
+
+        The X1C exposes its camera as an RTSPS stream on port 322,
+        authenticated with `bblp` / access-code. Bambu uses a self-signed
+        certificate; we let ffmpeg accept it (the LAN-only nature of the
+        connection is the trust boundary, not TLS).
+
+        We invoke the bundled `imageio-ffmpeg` binary so users don't need
+        a system ffmpeg on PATH.
+
+        Returns `(ok, message)`. On success, `message` is the absolute
+        path to the written JPEG. On failure, it's a one-line error.
+        """
+        cfg = self.config
+        if not cfg.ip:
+            return False, "no IP configured for this printer"
+        if not cfg.access_code:
+            return False, "no access code configured (turn on Developer Mode)"
+
+        try:
+            from imageio_ffmpeg import get_ffmpeg_exe  # noqa: PLC0415
+        except ImportError as e:
+            return False, (
+                f"imageio-ffmpeg not installed ({e}). Reinstall the project "
+                f"with `pip install -e .` to pull it in."
+            )
+
+        try:
+            ffmpeg_exe = get_ffmpeg_exe()
+        except Exception as e:
+            return False, f"ffmpeg binary unavailable: {e}"
+
+        out_path = Path(out_path).resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        url = (
+            f"rtsps://bblp:{cfg.access_code}@{cfg.ip}:322/streaming/live/1"
+        )
+        cmd = [
+            ffmpeg_exe,
+            "-y",
+            "-loglevel", "error",
+            "-rtsp_transport", "tcp",
+            "-i", url,
+            "-frames:v", "1",
+            "-update", "1",
+            "-q:v", "2",
+            str(out_path),
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return False, (
+                f"snapshot timed out after {timeout:.0f}s — printer may be "
+                f"offline, the access code wrong, or developer mode disabled"
+            )
+
+        if result.returncode != 0:
+            err_lines = (result.stderr or "").strip().splitlines()
+            err = err_lines[-1] if err_lines else f"exit {result.returncode}"
+            return False, f"ffmpeg failed: {err}"
+
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            return False, "ffmpeg reported success but the output file is empty"
+
+        return True, str(out_path)
+
     # -------- live state query (MQTT pushall) -------------------------
 
     def get_state(self, *, timeout: float = 5.0) -> PrinterState:
@@ -394,6 +513,27 @@ class BambuLabPrinter(Printer):
                 ),
             )
         return _parse_printer_state(merged)
+
+    def camera_snapshot(self, *, timeout: float = 12.0) -> bytes:
+        """Capture a single JPEG frame and return its bytes.
+
+        Thin wrapper around `fetch_snapshot()` — convenient for the
+        in-process MCP tool path where the agent wants the image inline
+        rather than handed a file path. Reads the temp file produced by
+        ffmpeg, then deletes it.
+        """
+        import tempfile  # noqa: PLC0415
+        out = Path(tempfile.gettempdir()) / f"bambu-snap-{uuid.uuid4().hex[:8]}.jpg"
+        try:
+            ok, msg = self.fetch_snapshot(out, timeout=timeout)
+            if not ok:
+                raise RuntimeError(msg)
+            return out.read_bytes()
+        finally:
+            try:
+                out.unlink()
+            except OSError:
+                pass
 
     # -------- send a print --------------------------------------------
 
@@ -683,6 +823,20 @@ def _parse_printer_state(merged: dict) -> PrinterState:
     except (TypeError, ValueError):
         nozzle_diameter_mm = None
 
+    # Live print-job fields. These are present in every report Bambu
+    # sends, defaulting to "IDLE"/0/empty when nothing is printing.
+    def _opt_int(v) -> int | None:
+        try:
+            return int(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    def _opt_float(v) -> float | None:
+        try:
+            return float(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
     return PrinterState(
         online=True,
         bed_type=bed_type,
@@ -691,6 +845,17 @@ def _parse_printer_state(merged: dict) -> PrinterState:
         slots=slots,
         nozzle_diameter_mm=nozzle_diameter_mm,
         nozzle_type=str(print_node.get("nozzle_type") or ""),
+        gcode_state=str(print_node.get("gcode_state") or "").upper(),
+        print_filename=str(print_node.get("subtask_name") or print_node.get("gcode_file") or ""),
+        progress_pct=_opt_int(print_node.get("mc_percent")),
+        layer_num=_opt_int(print_node.get("layer_num")),
+        total_layer_num=_opt_int(print_node.get("total_layer_num")),
+        time_remaining_min=_opt_int(print_node.get("mc_remaining_time")),
+        nozzle_c=_opt_float(print_node.get("nozzle_temper")),
+        nozzle_target_c=_opt_float(print_node.get("nozzle_target_temper")),
+        bed_c=_opt_float(print_node.get("bed_temper")),
+        bed_target_c=_opt_float(print_node.get("bed_target_temper")),
+        chamber_c=_opt_float(print_node.get("chamber_temper")),
     )
 
 

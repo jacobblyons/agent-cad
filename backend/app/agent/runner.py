@@ -230,6 +230,22 @@ Your job in this turn:
      mcp__cad__send_to_printer to upload + start the print over LAN.
      Confirm before sending — printing wastes filament and time, so don't
      auto-send unless the user told you to.
+  5. AFTER sending, take a `mcp__cad__printer_snapshot` to verify the
+     print actually started cleanly. The first 30s catches most failures
+     (no filament loaded, bad first layer, plate-detection wrong) and
+     it's much cheaper to abort then than 8 hours in.
+
+Live monitoring tools:
+  - mcp__cad__print_status pulls fresh MQTT state — gives you the
+    printer's gcode_state (RUNNING / PAUSE / FINISH / FAILED), progress %,
+    layer N/M, time remaining, nozzle/bed temps. Use it to answer "is
+    it done yet?" / "how's it going?" without spamming the camera.
+  - mcp__cad__printer_snapshot grabs one JPEG frame from the chamber
+    camera and returns it for you to actually SEE (you're multimodal).
+    Use it the moment the user expresses any concern about visual print
+    quality — stringing, layer shifts, parts pulling off the bed,
+    nozzle clogs, weird colour. Camera is wide-FOV and lit greenish by
+    the chamber LED; the colour cast is normal.
 
 You DO NOT have CAD tools in the print phase — no Edit, run_model,
 snapshot, etc. If the user wants to change the geometry they have to
