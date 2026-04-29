@@ -1,7 +1,19 @@
 import { useEffect, useState } from "react";
-import { FolderOpen } from "lucide-react";
+import { FolderOpen, Plus, Trash2 } from "lucide-react";
 import { call } from "@/lib/pywebview";
 import { Dialog, FieldLabel, PrimaryButton, SecondaryButton, TextInput } from "./Dialog";
+
+type PrinterConfig = {
+  id: string;
+  name: string;
+  kind: string;
+  ip: string;
+  serial: string;
+  access_code: string;
+  printer_profile: string;
+  process_profile: string;
+  filament_profile: string;
+};
 
 type Settings = {
   model: string;
@@ -11,6 +23,9 @@ type Settings = {
   sketchfab_token: string;
   playwright_enabled: boolean;
   playwright_require_permission: boolean;
+  printers: PrinterConfig[];
+  default_printer_id: string;
+  bambu_studio_cli_path: string;
 };
 type ModelOpt = { id: string; label: string; tier: string };
 type EffortOpt = { id: string; label: string };
@@ -20,6 +35,20 @@ type GetResponse = {
   models: ModelOpt[];
   efforts: EffortOpt[];
 };
+
+function emptyBambuPrinter(): PrinterConfig {
+  return {
+    id: `bambu-${Math.random().toString(36).slice(2, 8)}`,
+    name: "Bambu X1C",
+    kind: "bambu_x1c",
+    ip: "",
+    serial: "",
+    access_code: "",
+    printer_profile: "",
+    process_profile: "",
+    filament_profile: "",
+  };
+}
 
 type Props = { open: boolean; onClose: () => void };
 
@@ -218,6 +247,11 @@ export function SettingsDialog({ open, onClose }: Props) {
             )}
           </div>
 
+          <PrintersSection
+            draft={draft}
+            onChange={setDraft}
+          />
+
           {error && (
             <div className="mt-3 rounded-sm border border-[#f48771] bg-[#3a1d1d] px-2 py-1.5 text-xs text-[#f48771]">
               {error}
@@ -226,5 +260,213 @@ export function SettingsDialog({ open, onClose }: Props) {
         </>
       )}
     </Dialog>
+  );
+}
+
+function PrintersSection({
+  draft,
+  onChange,
+}: {
+  draft: Settings;
+  onChange: (s: Settings) => void;
+}) {
+  const [testResult, setTestResult] = useState<Record<string, string>>({});
+  const printers = draft.printers ?? [];
+
+  const update = (idx: number, patch: Partial<PrinterConfig>) => {
+    const next = printers.map((p, i) => (i === idx ? { ...p, ...patch } : p));
+    onChange({ ...draft, printers: next });
+  };
+  const remove = (idx: number) => {
+    const removed = printers[idx];
+    const next = printers.filter((_, i) => i !== idx);
+    let dflt = draft.default_printer_id;
+    if (removed && removed.id === dflt) dflt = next[0]?.id ?? "";
+    onChange({ ...draft, printers: next, default_printer_id: dflt });
+  };
+  const add = () => {
+    const fresh = emptyBambuPrinter();
+    const next = [...printers, fresh];
+    onChange({
+      ...draft,
+      printers: next,
+      default_printer_id: draft.default_printer_id || fresh.id,
+    });
+  };
+
+  const test = async (idx: number) => {
+    const p = printers[idx];
+    if (!p) return;
+    // Save the in-progress draft first so the backend can see it.
+    setTestResult((r) => ({ ...r, [p.id]: "saving…" }));
+    const save = await call<{ ok: boolean; error?: string }>(
+      "settings_set",
+      draft,
+    );
+    if (!save.ok) {
+      setTestResult((r) => ({ ...r, [p.id]: `save failed: ${save.error}` }));
+      return;
+    }
+    setTestResult((r) => ({ ...r, [p.id]: "testing…" }));
+    const r = await call<{ ok: boolean; message?: string; error?: string }>(
+      "print_test_printer",
+      p.id,
+    );
+    setTestResult((cur) => ({
+      ...cur,
+      [p.id]: r.ok
+        ? `✓ ${r.message ?? "reachable"}`
+        : `✗ ${r.message ?? r.error ?? "unreachable"}`,
+    }));
+  };
+
+  return (
+    <div className="mt-4 border-t border-[var(--color-border)] pt-4">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-sm text-[var(--color-text)]">3D printers</span>
+        <SecondaryButton onClick={add} title="Add a Bambu Lab X1C">
+          <span className="flex items-center gap-1">
+            <Plus size={11} />
+            Add Bambu X1C
+          </span>
+        </SecondaryButton>
+      </div>
+      <p className="mb-3 text-xs text-[var(--color-muted)]">
+        Configure at least one printer to enable the print phase. The X1C
+        must be in <span className="font-mono">Developer Mode</span> for LAN
+        access — find it under Settings → General → Developer Mode on the
+        printer's screen. The access code lives under Settings → WLAN → ⓘ.
+      </p>
+
+      {printers.length === 0 && (
+        <div className="rounded-sm border border-dashed border-[var(--color-border)] px-3 py-3 text-xs text-[var(--color-muted)]">
+          No printers configured. Add one to unlock the print phase.
+        </div>
+      )}
+
+      {printers.map((p, i) => {
+        const isDefault = draft.default_printer_id === p.id;
+        const status = testResult[p.id];
+        return (
+          <div
+            key={p.id}
+            className="mb-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-3"
+          >
+            <div className="mb-2 flex items-center gap-2">
+              <TextInput
+                value={p.name}
+                onChange={(e) => update(i, { name: e.target.value })}
+                placeholder="My X1C"
+                className="!w-[180px]"
+              />
+              <span className="rounded-sm bg-[var(--color-hover)] px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-[var(--color-muted)]">
+                {p.kind}
+              </span>
+              <label className="ml-auto flex cursor-pointer items-center gap-1 text-xs text-[var(--color-muted)]">
+                <input
+                  type="radio"
+                  name="default-printer"
+                  checked={isDefault}
+                  onChange={() =>
+                    onChange({ ...draft, default_printer_id: p.id })
+                  }
+                  className="h-3 w-3 cursor-pointer"
+                />
+                <span>Default</span>
+              </label>
+              <button
+                onClick={() => remove(i)}
+                title="Remove printer"
+                className="rounded-sm p-1 text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[#f48771]"
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <FieldLabel>IP address</FieldLabel>
+                <TextInput
+                  value={p.ip}
+                  onChange={(e) => update(i, { ip: e.target.value })}
+                  placeholder="192.168.1.42"
+                  spellCheck={false}
+                />
+              </div>
+              <div>
+                <FieldLabel>Serial number</FieldLabel>
+                <TextInput
+                  value={p.serial}
+                  onChange={(e) => update(i, { serial: e.target.value })}
+                  placeholder="01S00A…"
+                  spellCheck={false}
+                />
+              </div>
+              <div className="col-span-2">
+                <FieldLabel>Access code (developer mode)</FieldLabel>
+                <TextInput
+                  type="password"
+                  value={p.access_code}
+                  onChange={(e) => update(i, { access_code: e.target.value })}
+                  placeholder="8 digits from the printer's screen"
+                  spellCheck={false}
+                />
+              </div>
+              <div className="col-span-2">
+                <FieldLabel>Bambu Studio printer profile (optional)</FieldLabel>
+                <TextInput
+                  value={p.printer_profile}
+                  onChange={(e) =>
+                    update(i, { printer_profile: e.target.value })
+                  }
+                  placeholder="Bambu Lab X1 Carbon 0.4 nozzle"
+                  spellCheck={false}
+                />
+                <p className="mt-1 text-[11px] text-[var(--color-muted)]">
+                  Leave blank to use Bambu Studio's autodetect. Set to a
+                  specific profile name from Bambu Studio if you've customised
+                  one.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-2 flex items-center gap-2">
+              <SecondaryButton onClick={() => test(i)}>
+                Test connection
+              </SecondaryButton>
+              {status && (
+                <span
+                  className={
+                    status.startsWith("✓")
+                      ? "text-xs text-[#89d185]"
+                      : status.startsWith("✗")
+                        ? "text-xs text-[#f48771]"
+                        : "text-xs text-[var(--color-muted)]"
+                  }
+                >
+                  {status}
+                </span>
+              )}
+            </div>
+          </div>
+        );
+      })}
+
+      <div className="mt-3">
+        <FieldLabel>Bambu Studio CLI path (optional)</FieldLabel>
+        <TextInput
+          value={draft.bambu_studio_cli_path}
+          onChange={(e) =>
+            onChange({ ...draft, bambu_studio_cli_path: e.target.value })
+          }
+          placeholder="auto-detected from default install location"
+          spellCheck={false}
+        />
+        <p className="mt-1 text-[11px] text-[var(--color-muted)]">
+          Override only if Bambu Studio is installed in a non-standard
+          location.
+        </p>
+      </div>
+    </div>
   );
 }

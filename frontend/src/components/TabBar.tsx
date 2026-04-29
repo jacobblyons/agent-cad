@@ -4,6 +4,7 @@ import {
   FolderOpen,
   Loader2,
   Plus,
+  Printer,
   RefreshCw,
   Save,
   Settings,
@@ -12,6 +13,7 @@ import {
 import { call } from "@/lib/pywebview";
 import { useDoc } from "@/lib/doc";
 import { useChat } from "@/lib/chat";
+import { usePrint } from "@/lib/print";
 import { useTabs } from "@/lib/tabs";
 import { useUi } from "@/lib/ui";
 import { cn } from "@/lib/utils";
@@ -22,9 +24,22 @@ export function TabBar() {
   const { isAgentRunning } = useChat();
   const { tabs, activeId, focusTab, closeTab } = useTabs();
   const ui = useUi();
+  const print = usePrint();
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
+
+  const enterPrint = async () => {
+    if (!doc || print.busy || print.active) return;
+    if (print.printers.length === 0) {
+      const goSettings = window.confirm(
+        "No printers configured yet. Open Settings to add one?",
+      );
+      if (goSettings) ui.openSettings();
+      return;
+    }
+    await print.enter();
+  };
 
   const exportCombined = async () => {
     if (!doc || exporting) return;
@@ -148,6 +163,19 @@ export function TabBar() {
           title="Export every visible object as STL / STEP / BREP"
         >
           <Download size={13} className={cn(exporting && "animate-pulse")} />
+        </ToolbarBtn>
+        <ToolbarBtn
+          onClick={enterPrint}
+          disabled={!doc || print.busy || print.active}
+          title={
+            print.active
+              ? "Already in the print phase"
+              : print.printers.length === 0
+                ? "Configure a 3D printer in Settings to enable"
+                : "Enter the print phase — slice + send to a 3D printer"
+          }
+        >
+          <Printer size={13} className={cn(print.busy && "animate-pulse")} />
         </ToolbarBtn>
         <ToolbarBtn
           onClick={save}

@@ -6,7 +6,7 @@ project state lives in the project itself.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".agent-cad"
@@ -87,6 +87,16 @@ class Settings:
     # agent runs Playwright tools without asking. CAD tools are always
     # auto-allowed regardless of this setting.
     playwright_require_permission: bool = True
+    # 3D-printer configurations. Empty list = the print phase stays
+    # disabled (the "Print" button is hidden in the UI). Each entry is
+    # a dict — see backend/app/printing/printers.py for the shape per
+    # `kind` (currently only "bambu_x1c"). We store them as plain dicts
+    # rather than typed objects so future printer kinds can introduce
+    # new fields without a migration.
+    printers: list = field(default_factory=list)
+    default_printer_id: str = ""
+    # Optional explicit path to the slicer CLI. Empty = autodiscover.
+    bambu_studio_cli_path: str = ""
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -101,6 +111,12 @@ def load() -> Settings:
         d = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
     except Exception:
         return Settings()
+    raw_printers = d.get("printers")
+    printers: list = []
+    if isinstance(raw_printers, list):
+        for entry in raw_printers:
+            if isinstance(entry, dict) and entry.get("id"):
+                printers.append(dict(entry))
     return Settings(
         model=d.get("model", DEFAULT_MODEL),
         default_project_dir=d.get("default_project_dir", str(DEFAULT_PROJECT_DIR)),
@@ -111,6 +127,9 @@ def load() -> Settings:
         playwright_require_permission=bool(
             d.get("playwright_require_permission", True)
         ),
+        printers=printers,
+        default_printer_id=str(d.get("default_printer_id", "") or ""),
+        bambu_studio_cli_path=str(d.get("bambu_studio_cli_path", "") or ""),
     )
 
 

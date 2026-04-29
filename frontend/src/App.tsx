@@ -23,6 +23,14 @@ import {
   type Turn,
 } from "@/lib/chat";
 import { DocContext, type DocSummary } from "@/lib/doc";
+import {
+  PrintContext,
+  type PresetInfo,
+  type PrintCtx,
+  type PrintSession,
+  type PrinterSummary,
+  type SliceOverride,
+} from "@/lib/print";
 import { call, on } from "@/lib/pywebview";
 import { TabsContext, type TabState } from "@/lib/tabs";
 import { UiContext } from "@/lib/ui";
@@ -131,6 +139,10 @@ export default function App() {
     lastFrameAt: null,
   });
   const [browserCollapsed, setBrowserCollapsed] = useState(true);
+  const [printPrinters, setPrintPrinters] = useState<PrinterSummary[]>([]);
+  const [printDefaultPrinterId, setPrintDefaultPrinterId] = useState<string>("");
+  const [printPresets, setPrintPresets] = useState<PresetInfo[]>([]);
+  const [printBusy, setPrintBusy] = useState(false);
 
   const activeTab = useMemo(
     () => tabs.find((t) => t.doc.id === activeId) ?? null,
@@ -155,6 +167,7 @@ export default function App() {
           importGeometry: {},
           pendingAttachments: [],
           todos: [],
+          printSession: null,
         },
       ];
     });
@@ -440,6 +453,23 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    type PrintStateEvent = {
+      doc_id: string;
+      active: boolean;
+      session: PrintSession | null;
+    };
+    return on<PrintStateEvent>("print_state", (p) => {
+      setTabs((cur) =>
+        cur.map((t) =>
+          t.doc.id === p.doc_id
+            ? { ...t, printSession: p.active ? p.session : null }
+            : t,
+        ),
+      );
+    });
+  }, []);
+
+  useEffect(() => {
     return on<PermissionRequestEvent>("permission_request", (p) => {
       setTabs((cur) =>
         cur.map((t) => {
@@ -626,6 +656,154 @@ export default function App() {
     [browserState, browserCollapsed],
   );
 
+  // --- print phase ----------------------------------------------------
+
+  const refreshPrintCatalog = useCallback(async () => {
+    if (!doc) return;
+    type Resp = {
+      ok: boolean;
+      printers: PrinterSummary[];
+      default_printer_id: string;
+      presets: PresetInfo[];
+    };
+    const r = await call<Resp>("print_phase_get", doc.id);
+    if (r?.ok) {
+      setPrintPrinters(r.printers ?? []);
+      setPrintDefaultPrinterId(r.default_printer_id ?? "");
+      setPrintPresets(r.presets ?? []);
+    }
+  }, [doc]);
+
+  // Refresh print catalog on tab switch / settings save (best-effort).
+  useEffect(() => {
+    refreshPrintCatalog();
+  }, [refreshPrintCatalog]);
+
+  const printEnter = useCallback(
+    async (preset?: string) => {
+      if (!doc) return;
+      setPrintBusy(true);
+      try {
+        type Resp = {
+          ok: boolean;
+          error?: string;
+          session?: PrintSession;
+          printers?: PrinterSummary[];
+          default_printer_id?: string;
+          presets?: PresetInfo[];
+        };
+        const r = await call<Resp>("print_phase_enter", doc.id, preset);
+        if (!r?.ok) {
+          window.alert(r?.error ?? "could not enter print phase");
+          return;
+        }
+        if (r.printers) setPrintPrinters(r.printers);
+        if (r.default_printer_id != null)
+          setPrintDefaultPrinterId(r.default_printer_id);
+        if (r.presets) setPrintPresets(r.presets);
+        // Kick off an initial slice in the background so the user sees
+        // the estimate by the time they look at the print pane. Errors
+        // surface in the UI via session.last_slice.error.
+        await call("print_slice", doc.id);
+      } finally {
+        setPrintBusy(false);
+      }
+    },
+    [doc],
+  );
+
+  const printLeave = useCallback(async () => {
+    if (!doc) return;
+    await call("print_phase_leave", doc.id);
+  }, [doc]);
+
+  const printSetPreset = useCallback(
+    async (preset: string) => {
+      if (!doc) return;
+      setPrintBusy(true);
+      try {
+        await call("print_set_preset", doc.id, preset);
+        await call("print_slice", doc.id);
+      } finally {
+        setPrintBusy(false);
+      }
+    },
+    [doc],
+  );
+
+  const printSetPrinter = useCallback(
+    async (printerId: string) => {
+      if (!doc) return;
+      await call("print_set_printer", doc.id, printerId);
+    },
+    [doc],
+  );
+
+  const printSetOverrides = useCallback(
+    async (overrides: SliceOverride[]) => {
+      if (!doc) return;
+      setPrintBusy(true);
+      try {
+        await call("print_set_overrides", doc.id, overrides);
+      } finally {
+        setPrintBusy(false);
+      }
+    },
+    [doc],
+  );
+
+  const printSlice = useCallback(async () => {
+    if (!doc) return;
+    setPrintBusy(true);
+    try {
+      await call("print_slice", doc.id);
+    } finally {
+      setPrintBusy(false);
+    }
+  }, [doc]);
+
+  const printSend = useCallback(async () => {
+    if (!doc) return;
+    setPrintBusy(true);
+    try {
+      await call("print_send", doc.id);
+    } finally {
+      setPrintBusy(false);
+    }
+  }, [doc]);
+
+  const printCtx = useMemo<PrintCtx>(
+    () => ({
+      active: !!activeTab?.printSession,
+      session: activeTab?.printSession ?? null,
+      printers: printPrinters,
+      defaultPrinterId: printDefaultPrinterId,
+      presets: printPresets,
+      busy: printBusy,
+      enter: printEnter,
+      leave: printLeave,
+      setPreset: printSetPreset,
+      setPrinter: printSetPrinter,
+      setOverrides: printSetOverrides,
+      slice: printSlice,
+      send: printSend,
+    }),
+    [
+      activeTab,
+      printPrinters,
+      printDefaultPrinterId,
+      printPresets,
+      printBusy,
+      printEnter,
+      printLeave,
+      printSetPreset,
+      printSetPrinter,
+      printSetOverrides,
+      printSlice,
+      printSend,
+    ],
+  );
+
   return (
     <UiContext.Provider value={ui}>
       <TabsContext.Provider value={tabsCtx}>
@@ -633,6 +811,7 @@ export default function App() {
           <DocContext.Provider value={{ doc, refresh }}>
             <ViewerContext.Provider value={viewerCtx}>
               <BrowserContext.Provider value={browserCtx}>
+                <PrintContext.Provider value={printCtx}>
                 {tabs.length > 0 ? (
                   <AppShell />
                 ) : (
@@ -652,7 +831,15 @@ export default function App() {
                 onClose={() => setShowOpen(false)}
                 onOpened={addTab}
               />
-              <SettingsDialog open={showSettings} onClose={() => setShowSettings(false)} />
+              <SettingsDialog
+                open={showSettings}
+                onClose={() => {
+                  setShowSettings(false);
+                  // Settings might have changed printers — refresh.
+                  refreshPrintCatalog();
+                }}
+              />
+              </PrintContext.Provider>
               </BrowserContext.Provider>
             </ViewerContext.Provider>
           </DocContext.Provider>

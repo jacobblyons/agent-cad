@@ -13,6 +13,12 @@ Entity refs (used by distance_between):
     "main.edge[3]"      edge index 3 of 'main'
     "main.vertex[0]"    vertex index 0 of 'main'
     ".face[7]"          (no object prefix) face 7 of the active object
+
+When the project is in the *print phase* (see backend/app/printing/) the
+CAD tools above are hidden and a separate set of print-phase tools
+(slice_for_print, set_print_preset, add_print_override, …) is exposed
+instead. The agent shouldn't be editing geometry while the user is
+trying to send a print job.
 """
 from __future__ import annotations
 
@@ -1339,6 +1345,132 @@ def build_cad_tools(toolset: CadToolset) -> list[Any]:
     if s.sketchfab_enabled and s.sketchfab_token:
         base_tools.extend([sketchfab_search, sketchfab_view, sketchfab_download])
     return base_tools
+
+
+def build_print_server(toolset: "PrintToolset") -> Any:
+    """In-process MCP server exposing the print-phase tools."""
+    return create_sdk_mcp_server(
+        name="cad",
+        version="0.4.0",
+        tools=build_print_tools(toolset),
+    )
+
+
+class PrintToolset:
+    """Per-turn handle for the print-phase tools.
+
+    Doesn't hold a CADQuery model — the print phase doesn't run any CAD
+    code. It just owns a callback to the JsApi so the tools can mutate
+    the project's PrintSession + trigger slice / send.
+    """
+
+    def __init__(self, project: Project, api):
+        self.project = project
+        self.api = api  # JsApi
+
+
+def build_print_tools(toolset: "PrintToolset") -> list[Any]:
+    @tool(
+        "slice_for_print",
+        "Slice the project's current geometry for the configured 3D printer using the active preset and any applied overrides. Bambu Studio's CLI auto-orients the part as part of this pass. Returns ok/error plus the time / filament estimate; the user sees the same numbers in the print panel. Call this any time you change the preset or add an override.",
+        {},
+    )
+    async def slice_for_print(args):
+        r = toolset.api.print_slice(toolset.project.id)
+        if not r.get("ok"):
+            return _err(r.get("error") or "slice failed")
+        s = (r.get("session") or {}).get("last_slice") or {}
+        mins = s.get("estimated_minutes")
+        gms = s.get("estimated_filament_g")
+        bits = []
+        if mins is not None:
+            h, m = int(mins // 60), int(mins % 60)
+            bits.append(f"~{h}h{m:02d}m" if h else f"~{m}m")
+        if gms is not None:
+            bits.append(f"~{gms:.0f}g filament")
+        summary = ", ".join(bits) if bits else "estimate unavailable"
+        return _ok(f"sliced ok ({summary}). 3MF at {s.get('sliced_path')}")
+
+    @tool(
+        "set_print_preset",
+        "Switch the active slice preset. preset: 'strong' | 'standard' | 'fine'. 'standard' is the balanced default; 'strong' = thicker layers + more walls + higher infill (mechanical parts); 'fine' = thin layers + slower speeds (visual / detailed parts). Switching invalidates the previous slice — call slice_for_print again.",
+        {"preset": str},
+    )
+    async def set_print_preset(args):
+        preset = (args.get("preset") or "").strip().lower()
+        r = toolset.api.print_set_preset(toolset.project.id, preset)
+        if not r.get("ok"):
+            return _err(r.get("error") or "set preset failed")
+        return _ok(f"preset set to {preset!r}. The previous slice is now stale — slice_for_print to refresh.")
+
+    @tool(
+        "add_print_override",
+        "Add or update a single slicer override. key/value are slicer-agnostic — the print backend translates known keys (infill_density, wall_loops, layer_height, support, brim, raft) into Bambu Studio's actual config keys. note explains WHY (the user sees it). Examples: key='support', value='on', note='tall thin tower would topple without supports'. Subsequent calls with the same key replace the value.",
+        {"key": str, "value": str, "note": str},
+    )
+    async def add_print_override(args):
+        key = (args.get("key") or "").strip()
+        if not key:
+            return _err("'key' is required")
+        proj_id = toolset.project.id
+        cur = toolset.api.print_phase_get(proj_id)
+        existing = ((cur.get("session") or {}).get("overrides")) or []
+        merged = [o for o in existing if o.get("key") != key]
+        merged.append({
+            "key": key,
+            "value": str(args.get("value") or ""),
+            "note": str(args.get("note") or ""),
+        })
+        r = toolset.api.print_set_overrides(proj_id, merged)
+        if not r.get("ok"):
+            return _err(r.get("error") or "set override failed")
+        return _ok(f"override {key}={args.get('value')!r} applied. slice_for_print to apply.")
+
+    @tool(
+        "clear_print_overrides",
+        "Drop every override and fall back to the active preset's defaults. Slice is invalidated.",
+        {},
+    )
+    async def clear_print_overrides(args):
+        r = toolset.api.print_set_overrides(toolset.project.id, [])
+        if not r.get("ok"):
+            return _err(r.get("error") or "clear failed")
+        return _ok("overrides cleared.")
+
+    @tool(
+        "send_to_printer",
+        "Upload the most recent successful slice to the configured printer over LAN and start the print. Requires the printer to be on, in developer / LAN mode, and reachable on the local network. Confirm with the user before calling this — printing wastes time + filament if you're wrong. Returns ok/error and a short status line.",
+        {},
+    )
+    async def send_to_printer(args):
+        r = toolset.api.print_send(toolset.project.id)
+        if not r.get("ok"):
+            return _err(r.get("message") or r.get("error") or "send failed")
+        return _ok(r.get("message") or "sent.")
+
+    @tool(
+        "print_status",
+        "Report the current print-phase state — selected printer, preset, overrides, last slice estimate, and last send result. Call when you want to check what's set without changing anything.",
+        {},
+    )
+    async def print_status(args):
+        r = toolset.api.print_phase_get(toolset.project.id)
+        return _ok(json.dumps(r, indent=2, default=str))
+
+    return [
+        slice_for_print, set_print_preset, add_print_override,
+        clear_print_overrides, send_to_printer, print_status,
+    ]
+
+
+PRINT_TOOL_NAMES = [
+    "mcp__cad__slice_for_print",
+    "mcp__cad__set_print_preset",
+    "mcp__cad__add_print_override",
+    "mcp__cad__clear_print_overrides",
+    "mcp__cad__send_to_printer",
+    "mcp__cad__print_status",
+]
 
 
 # Built-in SDK tools we expose alongside the CAD tools.

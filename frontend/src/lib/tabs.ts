@@ -9,6 +9,7 @@
 import { createContext, useContext } from "react";
 import type { AgentTodo, ChatImage, Turn } from "./chat";
 import type { DocSummary } from "./doc";
+import type { PrintSession } from "./print";
 import type { ImportGeometry, ObjectGeometry, SketchGeometry } from "./viewer";
 
 export type TabState = {
@@ -27,6 +28,9 @@ export type TabState = {
   // Latest TodoWrite snapshot from the agent. Empty until the agent first
   // publishes a list, then replaced wholesale on each TodoWrite call.
   todos: AgentTodo[];
+  // Print phase state for this tab — null when CAD-mode, populated once
+  // the user enters the print phase. Mirrors the backend session.
+  printSession: PrintSession | null;
 };
 
 export type TabsCtx = {

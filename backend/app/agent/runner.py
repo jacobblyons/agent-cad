@@ -38,8 +38,12 @@ from ..cad.script_runner import RunResult
 from ..events import bus
 from .tools import (
     ALL_TOOL_NAMES,
+    BUILTIN_TOOLS,
+    PRINT_TOOL_NAMES,
     CadToolset,
+    PrintToolset,
     build_cad_server,
+    build_print_server,
 )
 
 
@@ -193,6 +197,45 @@ User-assisted interaction (bot gates / CAPTCHAs / logins):
 - Login walls follow the same rule: stop, ask, wait. The user can
   type credentials directly in the embedded browser when "interact" is
   on; you should never try to autofill credentials yourself.
+"""
+
+
+PRINT_PHASE_PROMPT_TEMPLATE = """
+PRINT PHASE (active for this turn):
+The user has switched the project into the *print phase*. The viewer
+area on screen is now showing print options instead of the CAD scene.
+You are still the agent — the chat panel is right next to the print
+panel, the user can talk to you mid-flow, and they expect you to drive
+the slicer.
+
+Current print state:
+- printer:        {printer_label}
+- preset:         {preset}
+- overrides:      {overrides_summary}
+- last slice:     {last_slice_summary}
+
+Your job in this turn:
+  1. If the model isn't sliced yet (no last slice or it errored), call
+     mcp__cad__slice_for_print. Bambu Studio's CLI will auto-orient the
+     part as part of that pass.
+  2. Look at the slice estimate. If the user explicitly named a goal
+     ("strong" / "fine" / "fast" / a target time), set the preset with
+     mcp__cad__set_print_preset before slicing.
+  3. Apply overrides only when the geometry warrants it — eg. tall thin
+     features want supports, hollow internal volumes might want a higher
+     wall count, a mechanical clip might want stronger infill than the
+     preset's default. Use mcp__cad__add_print_override / clear_print_overrides.
+     Each override has a short `note` so the user understands WHY you set it.
+  4. When the user is happy with the preset + overrides + slice, call
+     mcp__cad__send_to_printer to upload + start the print over LAN.
+     Confirm before sending — printing wastes filament and time, so don't
+     auto-send unless the user told you to.
+
+You DO NOT have CAD tools in the print phase — no Edit, run_model,
+snapshot, etc. If the user wants to change the geometry they have to
+leave the print phase first ("back to CAD") and you'll get the editing
+toolset back. If they ask you to fix something model-side from inside
+the print phase, tell them to click the back arrow first.
 """
 
 
@@ -522,7 +565,8 @@ def _build_requirements_section(project: Project) -> str:
     )
 
 
-def _build_system_prompt(project: Project, *, playwright_active: bool) -> str:
+def _build_system_prompt(project: Project, *, playwright_active: bool,
+                          print_phase: dict | None = None) -> str:
     objs = [o["name"] for o in project.list_objects()]
     sketches = [s["name"] for s in project.list_sketches()]
     imports = [i["name"] for i in project.list_imports()]
@@ -543,6 +587,40 @@ def _build_system_prompt(project: Project, *, playwright_active: bool) -> str:
     # searching for them.
     if playwright_active:
         body += PLAYWRIGHT_PROMPT_BLOCK
+    if print_phase and print_phase.get("active"):
+        printer = print_phase.get("printer") or {}
+        printer_label = (
+            f"{printer.get('name', '?')} ({printer.get('kind', '?')})"
+            if printer else "no printer selected"
+        )
+        overrides = print_phase.get("overrides") or []
+        if overrides:
+            overrides_summary = ", ".join(
+                f"{o['key']}={o['value']}" for o in overrides
+            )
+        else:
+            overrides_summary = "(none — preset defaults)"
+        last = print_phase.get("last_slice")
+        if last and last.get("ok"):
+            mins = last.get("estimated_minutes")
+            gms = last.get("estimated_filament_g")
+            bits = []
+            if mins is not None:
+                h, m = int(mins // 60), int(mins % 60)
+                bits.append(f"~{h}h{m:02d}m" if h else f"~{m}m")
+            if gms is not None:
+                bits.append(f"~{gms:.0f}g")
+            last_summary = ", ".join(bits) if bits else "ok"
+        elif last:
+            last_summary = f"FAILED: {last.get('error') or 'unknown error'}"
+        else:
+            last_summary = "(not sliced yet)"
+        body += PRINT_PHASE_PROMPT_TEMPLATE.format(
+            printer_label=printer_label,
+            preset=print_phase.get("preset", "standard"),
+            overrides_summary=overrides_summary,
+            last_slice_summary=last_summary,
+        )
     return body
 
 
@@ -624,14 +702,30 @@ def run_chat_turn(
     on_run: Callable[[RunResult], None],
     attachments: list[dict] | None = None,
     msg_id: str | None = None,
+    extra_context: dict | None = None,
+    print_api: Any | None = None,
 ) -> None:
-    """Fire-and-forget agent invocation. Progress streams via bus.emit."""
+    """Fire-and-forget agent invocation. Progress streams via bus.emit.
+
+    `print_api` (when provided) is a JsApi-like object the print-phase
+    tools call back into for slice / send / state mutations. We pass it
+    in rather than importing JsApi here to avoid a runner→api circular
+    dependency.
+    """
     msg_id = msg_id or f"msg_{uuid.uuid4().hex[:8]}"
-    toolset = CadToolset(project, on_run)
+    extra_context = extra_context or {}
+    print_phase = (extra_context.get("print_phase") or {}) if extra_context else {}
+    if print_phase.get("active") and print_api is not None:
+        # In the print phase the toolset object the runner hands the
+        # tools is a PrintToolset — it doesn't run model.py scripts, so
+        # tools.py's CAD-specific surface stays out of scope.
+        toolset = PrintToolset(project, print_api)
+    else:
+        toolset = CadToolset(project, on_run)
 
     def _worker():
         try:
-            asyncio.run(_run(project, toolset, prompt, attachments, msg_id))
+            asyncio.run(_run(project, toolset, prompt, attachments, msg_id, extra_context))
         except Exception as e:
             bus.emit("chat_event", {
                 "doc_id": project.id,
@@ -646,13 +740,20 @@ def run_chat_turn(
     threading.Thread(target=_worker, name="cad-agent", daemon=True).start()
 
 
-async def _run(project: Project, toolset: CadToolset, prompt: str,
-               attachments: list[dict] | None, msg_id: str) -> None:
-    server = build_cad_server(toolset)
+async def _run(project: Project, toolset, prompt: str,
+               attachments: list[dict] | None, msg_id: str,
+               extra_context: dict) -> None:
     user_settings = settings.load()
+    print_phase = (extra_context.get("print_phase") or {}) if extra_context else {}
 
-    mcp_servers: dict[str, Any] = {"cad": server}
-    allowed_tools = list(ALL_TOOL_NAMES)
+    mcp_servers: dict[str, Any] = {}
+    if isinstance(toolset, PrintToolset):
+        mcp_servers["cad"] = build_print_server(toolset)
+        # Print phase has no CAD editing — only print tools + safe builtins.
+        allowed_tools = list(BUILTIN_TOOLS) + list(PRINT_TOOL_NAMES)
+    else:
+        mcp_servers["cad"] = build_cad_server(toolset)
+        allowed_tools = list(ALL_TOOL_NAMES)
     cdp_http: str | None = None
     playwright_active = user_settings.playwright_enabled
     if playwright_active:
@@ -745,7 +846,11 @@ async def _run(project: Project, toolset: CadToolset, prompt: str,
         cwd=str(project.path),
         mcp_servers=mcp_servers,
         allowed_tools=allowed_tools,
-        system_prompt=_build_system_prompt(project, playwright_active=playwright_active),
+        system_prompt=_build_system_prompt(
+            project,
+            playwright_active=playwright_active,
+            print_phase=print_phase,
+        ),
         permission_mode="bypassPermissions",
         model=user_settings.model,
         effort=user_settings.effort,  # type: ignore[arg-type]

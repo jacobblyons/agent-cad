@@ -21,6 +21,15 @@ from .cad.script_runner import (
     tessellate_sketch as tessellate_sketch_script,
 )
 from .events import bus
+from .printing import (
+    PRESETS,
+    PRINTER_KINDS,
+    PhaseState,
+    SliceOverride,
+    build_printer,
+    build_slicer,
+)
+from .printing.presets import DEFAULT_PRESET, lookup as lookup_preset
 
 
 def _sketches_manifest(project: Project) -> list[dict]:
@@ -51,6 +60,11 @@ class JsApi:
     def __init__(self) -> None:
         self._t0 = time.time()
         self._projects: dict[str, Project] = {}
+        # Per-project print-phase state. Empty for any project not
+        # currently in the print phase. Lifetime is tied to the JsApi
+        # (process lifetime), not persisted to disk — leaving the print
+        # phase clears it.
+        self._print_phase = PhaseState()
 
     # --- diagnostics ---------------------------------------------------
 
@@ -627,8 +641,235 @@ class JsApi:
             prompt=text,
             on_run=lambda result: self._emit_run(proj, result),
             attachments=attachments,
+            extra_context=self._agent_extra_context(proj),
+            print_api=self,
         )
         return {"ok": True}
+
+    # --- print phase ---------------------------------------------------
+    #
+    # The print phase is a separate UI mode the user opts into. The
+    # frontend takes over the viewer area; the chat panel stays
+    # visible and the agent gets a phase-aware prompt block plus a
+    # handful of print-only tools. State lives in `self._print_phase`
+    # for the lifetime of the JsApi.
+
+    def print_phase_get(self, project_id: str) -> dict:
+        """Snapshot of phase state for a project. Always succeeds —
+        when the project isn't in the phase the response is `active=False`
+        with no session payload."""
+        s = settings.load()
+        printers_payload = self._printers_payload(s)
+        active = self._print_phase.is_active(project_id)
+        session = self._print_phase.get(project_id)
+        return {
+            "ok": True,
+            "active": active,
+            "session": session.to_json() if session else None,
+            "printers": printers_payload,
+            "default_printer_id": s.default_printer_id,
+            "presets": [
+                {"id": p.id, "label": p.label, "description": p.description}
+                for p in PRESETS
+            ],
+        }
+
+    def print_phase_enter(self, project_id: str,
+                          preset: str | None = None) -> dict:
+        """Transition the project into the print phase.
+
+        Exports every visible object into a single 3MF inside the
+        project's `.agentcad-cache/print/` folder, then runs the slicer
+        with the selected preset (defaulting to standard). The slicer
+        auto-orients the part as part of its first pass."""
+        proj = self._projects.get(project_id)
+        if proj is None:
+            return {"ok": False, "error": "not_found"}
+        s = settings.load()
+        if not s.printers:
+            return {"ok": False, "error": (
+                "no 3D printer is configured. Open Settings → Printers and "
+                "add one before entering the print phase."
+            )}
+        session = self._print_phase.enter(project_id)
+        if preset:
+            try:
+                lookup_preset(preset)
+                session.preset = preset
+            except KeyError as e:
+                return {"ok": False, "error": str(e)}
+        if not session.printer_id:
+            session.printer_id = s.default_printer_id or s.printers[0]["id"]
+        self._emit_print_state(project_id)
+        return self.print_phase_get(project_id)
+
+    def print_phase_leave(self, project_id: str) -> dict:
+        self._print_phase.leave(project_id)
+        bus.emit("print_state", {"doc_id": project_id, "active": False})
+        return {"ok": True}
+
+    def print_set_preset(self, project_id: str, preset: str) -> dict:
+        session = self._print_phase.get(project_id)
+        if session is None:
+            return {"ok": False, "error": "not in print phase"}
+        try:
+            lookup_preset(preset)
+        except KeyError as e:
+            return {"ok": False, "error": str(e)}
+        session.preset = preset
+        # Changing the preset invalidates the previous slice — UI hides
+        # filament / time numbers until re-slicing.
+        session.last_slice = None
+        self._emit_print_state(project_id)
+        return {"ok": True, "session": session.to_json()}
+
+    def print_set_printer(self, project_id: str, printer_id: str) -> dict:
+        session = self._print_phase.get(project_id)
+        if session is None:
+            return {"ok": False, "error": "not in print phase"}
+        s = settings.load()
+        if not any(p.get("id") == printer_id for p in s.printers):
+            return {"ok": False, "error": f"unknown printer {printer_id!r}"}
+        session.printer_id = printer_id
+        self._emit_print_state(project_id)
+        return {"ok": True, "session": session.to_json()}
+
+    def print_set_overrides(self, project_id: str,
+                             overrides: list[dict] | None = None) -> dict:
+        """Replace the override list wholesale. Each override is
+        `{key, value, note?}`. Used by both the agent (apply / clear)
+        and the UI (manual edits)."""
+        session = self._print_phase.get(project_id)
+        if session is None:
+            return {"ok": False, "error": "not in print phase"}
+        new: list[SliceOverride] = []
+        for ov in (overrides or []):
+            if not isinstance(ov, dict):
+                continue
+            key = str(ov.get("key", "")).strip()
+            if not key:
+                continue
+            new.append(SliceOverride(
+                key=key,
+                value=str(ov.get("value", "")).strip(),
+                note=str(ov.get("note", "") or ""),
+            ))
+        session.overrides = new
+        session.last_slice = None
+        self._emit_print_state(project_id)
+        return {"ok": True, "session": session.to_json()}
+
+    def print_slice(self, project_id: str) -> dict:
+        """Export the current visible objects, then slice with the
+        current preset + overrides. Updates session.last_slice."""
+        proj = self._projects.get(project_id)
+        if proj is None:
+            return {"ok": False, "error": "not_found"}
+        session = self._print_phase.get(project_id)
+        if session is None:
+            return {"ok": False, "error": "not in print phase"}
+
+        cache = proj.path / ".agentcad-cache" / "print"
+        cache.mkdir(parents=True, exist_ok=True)
+        export_path = cache / "model.3mf"
+        # Export every visible object as one combined 3MF — cheaper for the
+        # slicer (one part, one orientation pass) and gives Bambu Studio
+        # the structure it needs (3MF carries assemblies natively).
+        visible = [o for o in proj.list_objects() if o.get("visible", True)]
+        if not visible:
+            return {"ok": False, "error": "no visible objects to print"}
+        items = [
+            {
+                "name": o["name"],
+                "script": str(proj.object_source_path(o["name"])),
+                "params": str(proj.object_params_path(o["name"])),
+            }
+            for o in visible
+        ]
+        try:
+            er = export_models_script(
+                items, export_path, cwd=proj.path,
+                sketches=_sketches_manifest(proj),
+                imports=_imports_manifest(proj),
+            )
+        except Exception as e:
+            return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
+        if not er.ok:
+            return {"ok": False, "error": er.error or "export failed"}
+        session.last_export_path = str(export_path)
+
+        # Build the slicer + printer hint, then run.
+        s = settings.load()
+        slicer = build_slicer("bambu_studio", {
+            "cli_path": s.bambu_studio_cli_path,
+        })
+        printer_hint: dict = {}
+        if session.printer_id:
+            for p in s.printers:
+                if p.get("id") == session.printer_id:
+                    if p.get("kind") == "bambu_x1c":
+                        printer_hint = {
+                            "printer_profile": p.get("printer_profile", ""),
+                            "process_profile": p.get("process_profile", ""),
+                            "filament_profile": p.get("filament_profile", ""),
+                        }
+                    break
+
+        result = slicer.auto_orient_and_slice(
+            [export_path],
+            preset=session.preset,
+            overrides=session.overrides,
+            out_dir=cache,
+            printer_hint=printer_hint or None,
+        )
+        session.last_slice = result
+        self._emit_print_state(project_id)
+        return {"ok": result.ok, "session": session.to_json()}
+
+    def print_send(self, project_id: str) -> dict:
+        """Send the currently-sliced job to the configured printer."""
+        session = self._print_phase.get(project_id)
+        if session is None:
+            return {"ok": False, "error": "not in print phase"}
+        if session.last_slice is None or not session.last_slice.ok:
+            return {"ok": False, "error": "no successful slice — slice first"}
+        if not session.printer_id:
+            return {"ok": False, "error": "no printer selected"}
+        s = settings.load()
+        cfg = next((p for p in s.printers if p.get("id") == session.printer_id), None)
+        if cfg is None:
+            return {"ok": False, "error": f"printer {session.printer_id!r} no longer configured"}
+        try:
+            printer = build_printer(cfg.get("kind", "bambu_x1c"), cfg)
+        except Exception as e:
+            return {"ok": False, "error": f"could not init printer: {e}"}
+        ok, msg = printer.send_print(Path(session.last_slice.sliced_path))
+        session.last_send_ok = ok
+        session.last_send_message = msg
+        self._emit_print_state(project_id)
+        return {"ok": ok, "message": msg, "session": session.to_json()}
+
+    def print_test_printer(self, printer_id: str) -> dict:
+        """Diagnostic — test reachability without entering print phase.
+        Used by the Settings dialog's "Test connection" button."""
+        s = settings.load()
+        cfg = next((p for p in s.printers if p.get("id") == printer_id), None)
+        if cfg is None:
+            return {"ok": False, "error": f"unknown printer {printer_id!r}"}
+        try:
+            printer = build_printer(cfg.get("kind", "bambu_x1c"), cfg)
+        except Exception as e:
+            return {"ok": False, "error": f"bad config: {e}"}
+        ok, why = printer.is_available()
+        status = printer.status().to_json() if ok else None
+        return {"ok": ok, "message": why, "status": status}
+
+    def slicer_diagnose(self) -> dict:
+        """Return whether the slicer CLI is available + the path we'd use."""
+        s = settings.load()
+        slicer = build_slicer("bambu_studio", {"cli_path": s.bambu_studio_cli_path})
+        ok, info = slicer.is_available()
+        return {"ok": ok, "message": info if ok else None, "error": None if ok else info}
 
     # --- internals ----------------------------------------------------
 
@@ -751,6 +992,59 @@ class JsApi:
             if o.get("visible", True):
                 self._emit_object_geometry(project, o["name"])
         bus.emit("project_state", {"doc_id": project.id, "state": project.to_json()})
+
+    def _printers_payload(self, s: "settings.Settings") -> list[dict]:
+        """Sanitised printer list for the UI — strips the access code so
+        it's never round-tripped through the JS layer."""
+        out: list[dict] = []
+        for p in s.printers:
+            out.append({
+                "id": p.get("id"),
+                "name": p.get("name") or p.get("id"),
+                "kind": p.get("kind", "bambu_x1c"),
+                "ip": p.get("ip", ""),
+                "serial": p.get("serial", ""),
+                "has_access_code": bool(p.get("access_code")),
+                "printer_profile": p.get("printer_profile", ""),
+                "process_profile": p.get("process_profile", ""),
+                "filament_profile": p.get("filament_profile", ""),
+            })
+        return out
+
+    def _emit_print_state(self, project_id: str) -> None:
+        session = self._print_phase.get(project_id)
+        bus.emit("print_state", {
+            "doc_id": project_id,
+            "active": session is not None,
+            "session": session.to_json() if session else None,
+        })
+
+    def _agent_extra_context(self, project: Project) -> dict:
+        """Per-turn context the agent runner reads to tweak its prompt
+        + tool surface. Currently surfaces the print phase."""
+        session = self._print_phase.get(project.id)
+        if session is None:
+            return {}
+        s = settings.load()
+        printer_cfg = None
+        if session.printer_id:
+            printer_cfg = next(
+                (p for p in s.printers if p.get("id") == session.printer_id),
+                None,
+            )
+        return {
+            "print_phase": {
+                "active": True,
+                "preset": session.preset,
+                "overrides": [o.to_json() for o in session.overrides],
+                "last_slice": session.last_slice.to_json() if session.last_slice else None,
+                "printer": {
+                    "id": printer_cfg.get("id") if printer_cfg else None,
+                    "name": printer_cfg.get("name") if printer_cfg else None,
+                    "kind": printer_cfg.get("kind") if printer_cfg else None,
+                } if printer_cfg else None,
+            }
+        }
 
     def _emit_run(self, project: Project, result: RunResult) -> None:
         kind, name = project.active_artifact()
