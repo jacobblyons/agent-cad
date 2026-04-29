@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "agent-cad": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["backend/scripts/mcp_server.py"]
+    }
+  }
+}
