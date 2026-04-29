@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .presets import DEFAULT_PRESET
+from .printers import PrinterState
 from .slicers import SliceOverride, SliceResult
 
 
@@ -28,6 +29,11 @@ class PrintSession:
     last_send_message: str = ""
     last_send_ok: bool | None = None
     started_at: float = field(default_factory=time.time)
+    # Live snapshot from the printer — populated by `query_printer_state()`
+    # on phase entry and refreshable on demand. The slicer pulls
+    # filament/bed details from this so each slice matches what's
+    # actually loaded.
+    printer_state: PrinterState | None = None
 
     def to_json(self) -> dict:
         return {
@@ -40,6 +46,7 @@ class PrintSession:
             "last_send_message": self.last_send_message,
             "last_send_ok": self.last_send_ok,
             "started_at": self.started_at,
+            "printer_state": self.printer_state.to_json() if self.printer_state else None,
         }
 
 

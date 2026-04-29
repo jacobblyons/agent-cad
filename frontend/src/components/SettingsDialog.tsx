@@ -13,7 +13,16 @@ type PrinterConfig = {
   printer_profile: string;
   process_profile: string;
   filament_profile: string;
+  default_bed_type: string;
 };
+
+const BED_TYPE_OPTIONS: { value: string; label: string }[] = [
+  { value: "Textured PEI Plate", label: "Textured PEI Plate (default)" },
+  { value: "Cool Plate", label: "Cool Plate" },
+  { value: "High Temperature Plate", label: "High Temperature Plate" },
+  { value: "Engineering Plate", label: "Engineering Plate" },
+  { value: "Bambu Cool Plate SuperTack", label: "Bambu Cool Plate SuperTack" },
+];
 
 type Settings = {
   model: string;
@@ -47,6 +56,7 @@ function emptyBambuPrinter(): PrinterConfig {
     printer_profile: "",
     process_profile: "",
     filament_profile: "",
+    default_bed_type: "Textured PEI Plate",
   };
 }
 
@@ -394,11 +404,11 @@ function PrintersSection({
                 />
               </div>
               <div>
-                <FieldLabel>Serial number</FieldLabel>
+                <FieldLabel>Serial number (optional)</FieldLabel>
                 <TextInput
                   value={p.serial}
                   onChange={(e) => update(i, { serial: e.target.value })}
-                  placeholder="01S00A…"
+                  placeholder="01S00A… (only needed for one-click start)"
                   spellCheck={false}
                 />
               </div>
@@ -412,7 +422,27 @@ function PrintersSection({
                   spellCheck={false}
                 />
               </div>
-              <div className="col-span-2">
+              <div>
+                <FieldLabel>Build plate</FieldLabel>
+                <select
+                  value={p.default_bed_type || "Textured PEI Plate"}
+                  onChange={(e) =>
+                    update(i, { default_bed_type: e.target.value })
+                  }
+                  className="w-full rounded-sm border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-focus)]"
+                >
+                  {BED_TYPE_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-[11px] text-[var(--color-muted)]">
+                  Used as fallback when the printer's MQTT report doesn't
+                  include the current plate type (X1C firmware doesn't, yet).
+                </p>
+              </div>
+              <div>
                 <FieldLabel>Bambu Studio printer profile (optional)</FieldLabel>
                 <TextInput
                   value={p.printer_profile}
@@ -423,9 +453,7 @@ function PrintersSection({
                   spellCheck={false}
                 />
                 <p className="mt-1 text-[11px] text-[var(--color-muted)]">
-                  Leave blank to use Bambu Studio's autodetect. Set to a
-                  specific profile name from Bambu Studio if you've customised
-                  one.
+                  Blank = autodetect.
                 </p>
               </div>
             </div>

@@ -23,6 +23,25 @@ export type SliceResult = {
   log?: string;
 };
 
+export type FilamentSlot = {
+  tray_id: number;
+  type: string;
+  sub_brand: string;
+  color_hex: string;
+  tray_info_idx: string;
+};
+
+export type PrinterState = {
+  online: boolean;
+  bed_type: string;            // Bambu's MQTT name (eg "textured_plate")
+  bed_type_slicer: string;     // Translated to slicer's curr_bed_type
+  active_tray: number;
+  slots: FilamentSlot[];
+  nozzle_diameter_mm: number | null;
+  nozzle_type: string;
+  error: string;
+};
+
 export type PrintSession = {
   project_id: string;
   preset: string;
@@ -33,6 +52,7 @@ export type PrintSession = {
   last_send_message: string;
   last_send_ok: boolean | null;
   started_at: number;
+  printer_state: PrinterState | null;
 };
 
 export type PrinterSummary = {
@@ -45,6 +65,7 @@ export type PrinterSummary = {
   printer_profile: string;
   process_profile: string;
   filament_profile: string;
+  default_bed_type: string;
 };
 
 export type PresetInfo = {
@@ -70,6 +91,9 @@ export type PrintCtx = {
   setOverrides: (overrides: SliceOverride[]) => Promise<void>;
   slice: () => Promise<void>;
   send: () => Promise<void>;
+  /** Re-query the printer over MQTT for the current filament + bed
+   * type. Updates session.printer_state and invalidates the slice. */
+  refreshPrinterState: () => Promise<void>;
 };
 
 export const PrintContext = createContext<PrintCtx>({
@@ -86,6 +110,7 @@ export const PrintContext = createContext<PrintCtx>({
   setOverrides: async () => {},
   slice: async () => {},
   send: async () => {},
+  refreshPrinterState: async () => {},
 });
 
 export function usePrint() {

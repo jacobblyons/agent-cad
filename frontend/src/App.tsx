@@ -772,6 +772,16 @@ export default function App() {
     }
   }, [doc]);
 
+  const printRefreshPrinterState = useCallback(async () => {
+    if (!doc) return;
+    setPrintBusy(true);
+    try {
+      await call("print_query_printer_state", doc.id);
+    } finally {
+      setPrintBusy(false);
+    }
+  }, [doc]);
+
   const printCtx = useMemo<PrintCtx>(
     () => ({
       active: !!activeTab?.printSession,
@@ -787,6 +797,7 @@ export default function App() {
       setOverrides: printSetOverrides,
       slice: printSlice,
       send: printSend,
+      refreshPrinterState: printRefreshPrinterState,
     }),
     [
       activeTab,
@@ -801,6 +812,7 @@ export default function App() {
       printSetOverrides,
       printSlice,
       printSend,
+      printRefreshPrinterState,
     ],
   );
 

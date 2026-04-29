@@ -700,8 +700,29 @@ class JsApi:
                 return {"ok": False, "error": str(e)}
         if not session.printer_id:
             session.printer_id = s.default_printer_id or s.printers[0]["id"]
+        # Fire off a printer-state query in the background so the UI
+        # can render the phase immediately without blocking on the ~3s
+        # MQTT round-trip. The query updates session.printer_state and
+        # emits a fresh print_state event when it lands.
+        import threading as _threading  # noqa: PLC0415
+        _threading.Thread(
+            target=self._refresh_printer_state_async,
+            args=(project_id,),
+            daemon=True,
+            name="cad-printer-state",
+        ).start()
         self._emit_print_state(project_id)
         return self.print_phase_get(project_id)
+
+    def _refresh_printer_state_async(self, project_id: str) -> None:
+        """Background printer-state refresh. Swallows exceptions —
+        a failed query just leaves session.printer_state as None and
+        the UI shows 'querying…' indefinitely. We re-emit a print_state
+        event so the frontend picks up the populated snapshot."""
+        try:
+            self.print_query_printer_state(project_id)
+        except Exception:
+            self._emit_print_state(project_id)
 
     def print_phase_leave(self, project_id: str) -> dict:
         self._print_phase.leave(project_id)
@@ -803,17 +824,7 @@ class JsApi:
         slicer = build_slicer("bambu_studio", {
             "cli_path": s.bambu_studio_cli_path,
         })
-        printer_hint: dict = {}
-        if session.printer_id:
-            for p in s.printers:
-                if p.get("id") == session.printer_id:
-                    if p.get("kind") == "bambu_x1c":
-                        printer_hint = {
-                            "printer_profile": p.get("printer_profile", ""),
-                            "process_profile": p.get("process_profile", ""),
-                            "filament_profile": p.get("filament_profile", ""),
-                        }
-                    break
+        printer_hint = self._build_printer_hint(session, s)
 
         result = slicer.auto_orient_and_slice(
             [export_path],
@@ -825,6 +836,32 @@ class JsApi:
         session.last_slice = result
         self._emit_print_state(project_id)
         return {"ok": result.ok, "session": session.to_json()}
+
+    def print_query_printer_state(self, project_id: str) -> dict:
+        """Refresh the live snapshot from the printer (filament + bed
+        type + nozzle). The result lands on session.printer_state and
+        is fed into subsequent slices automatically."""
+        session = self._print_phase.get(project_id)
+        if session is None:
+            return {"ok": False, "error": "not in print phase"}
+        if not session.printer_id:
+            return {"ok": False, "error": "no printer selected"}
+        s = settings.load()
+        cfg = next((p for p in s.printers if p.get("id") == session.printer_id), None)
+        if cfg is None:
+            return {"ok": False, "error": f"printer {session.printer_id!r} not configured"}
+        try:
+            printer = build_printer(cfg.get("kind", "bambu_x1c"), cfg)
+        except Exception as e:
+            return {"ok": False, "error": f"printer config invalid: {e}"}
+        # MQTT pushall takes a couple of seconds in the worst case.
+        state = printer.get_state(timeout=6.0)
+        session.printer_state = state
+        # Slice estimates are tied to the previous filament/plate; flush.
+        if state.online and not state.error:
+            session.last_slice = None
+        self._emit_print_state(project_id)
+        return {"ok": state.online, "state": state.to_json()}
 
     def print_send(self, project_id: str) -> dict:
         """Send the currently-sliced job to the configured printer."""
@@ -1008,8 +1045,34 @@ class JsApi:
                 "printer_profile": p.get("printer_profile", ""),
                 "process_profile": p.get("process_profile", ""),
                 "filament_profile": p.get("filament_profile", ""),
+                "default_bed_type": p.get("default_bed_type", "Textured PEI Plate"),
             })
         return out
+
+    def _build_printer_hint(self, session, s: "settings.Settings") -> dict:
+        """Combine static printer config + live MQTT state into the
+        slicer's `printer_hint`. Detected fields override config-set
+        fallbacks; missing fields stay empty so slicer defaults apply."""
+        if not session.printer_id:
+            return {}
+        cfg = next((p for p in s.printers if p.get("id") == session.printer_id), None)
+        if cfg is None:
+            return {}
+        hint: dict = {
+            "printer_profile": cfg.get("printer_profile", ""),
+            "process_profile": cfg.get("process_profile", ""),
+            "filament_profile": cfg.get("filament_profile", ""),
+            "default_bed_type": cfg.get("default_bed_type", "Textured PEI Plate"),
+        }
+        ps = session.printer_state
+        if ps and ps.online:
+            active = ps.active_slot()
+            if active:
+                hint["detected_tray_type"] = active.type
+                hint["detected_tray_info_idx"] = active.tray_info_idx
+            if ps.bed_type_slicer:
+                hint["detected_bed_type_slicer"] = ps.bed_type_slicer
+        return hint
 
     def _emit_print_state(self, project_id: str) -> None:
         session = self._print_phase.get(project_id)

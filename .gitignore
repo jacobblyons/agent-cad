@@ -37,6 +37,11 @@ Thumbs.db
 # Generated CAD artifacts not under user control
 *.gltf.cache
 
+# Bambu Studio CLI dumps a result.json into its cwd on every invocation —
+# we don't need it tracked.
+/result.json
+/frontend/result.json
+
 # Claude Code local project state — but keep shared skills + agents tracked
 # so contributors using Claude Code pick up the same tooling.
 .claude/*

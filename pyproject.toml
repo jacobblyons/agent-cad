@@ -12,6 +12,9 @@ dependencies = [
     "numpy>=1.26",
     "httpx>=0.27",
     "websockets>=14",
+    # paho-mqtt is the protocol the Bambu printer's LAN-mode "start
+    # print" command rides on. Tiny, BSD-licensed, no transitive deps.
+    "paho-mqtt>=2.1",
 ]
 
 [project.optional-dependencies]

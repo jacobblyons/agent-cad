@@ -1,8 +1,10 @@
 import { useMemo } from "react";
 import {
   ArrowLeft,
+  Boxes,
   Loader2,
   Printer as PrinterIcon,
+  RefreshCw,
   RotateCw,
   Send,
   Settings as SettingsIcon,
@@ -52,11 +54,28 @@ export function PrintPane() {
 
   const slice_ = session?.last_slice ?? null;
   const overrides = session?.overrides ?? [];
+  const printerState = session?.printer_state ?? null;
 
   const printer = useMemo(
     () => printers.find((p) => p.id === session?.printer_id) ?? null,
     [printers, session?.printer_id],
   );
+
+  // Auto-detected filament + bed type, with fallback to the printer's
+  // configured default_bed_type when MQTT didn't report a plate.
+  const activeSlot = useMemo(() => {
+    if (!printerState || !printerState.online) return null;
+    if (printerState.active_tray < 0) {
+      return printerState.slots[0] ?? null;
+    }
+    return (
+      printerState.slots.find((s) => s.tray_id === printerState.active_tray) ??
+      printerState.slots[0] ??
+      null
+    );
+  }, [printerState]);
+  const detectedBedTypeSlicer =
+    printerState?.bed_type_slicer || printer?.default_bed_type || "";
 
   const removeOverride = (key: string) => {
     setOverrides(overrides.filter((o) => o.key !== key));
@@ -144,6 +163,109 @@ export function PrintPane() {
                 );
               })}
             </div>
+          </section>
+
+          {/* live printer snapshot */}
+          <section>
+            <div className="mb-2 flex items-center justify-between">
+              <h2 className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[var(--color-muted)]">
+                <Boxes size={11} />
+                Live from printer
+              </h2>
+              <button
+                onClick={usePrint().refreshPrinterState}
+                disabled={busy}
+                title="Re-query the printer over MQTT"
+                className="flex h-7 items-center gap-1.5 rounded-sm border border-[var(--color-border)] px-2.5 text-[11px] hover:bg-[var(--color-hover)] disabled:opacity-50"
+              >
+                {busy ? (
+                  <Loader2 size={11} className="animate-spin" />
+                ) : (
+                  <RefreshCw size={11} />
+                )}
+                <span>Refresh</span>
+              </button>
+            </div>
+            {printerState === null ? (
+              <div className="rounded-md border border-dashed border-[var(--color-border)] px-4 py-3 text-center text-xs text-[var(--color-muted)]">
+                {busy
+                  ? "Querying printer over MQTT…"
+                  : "No live state yet — click Refresh to query the printer."}
+              </div>
+            ) : !printerState.online ? (
+              <div className="rounded-md border border-[#dcb073] bg-[var(--color-panel)] p-3 text-xs text-[#dcb073]">
+                <div className="mb-1 font-medium">Printer didn't respond</div>
+                <div className="text-[var(--color-muted)]">
+                  {printerState.error ||
+                    "MQTT query timed out. Confirm Developer / LAN-Only Mode is on and the access code matches."}
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-panel)] p-4">
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-[var(--color-muted)]">
+                      Filament
+                    </div>
+                    <div className="mt-1 flex items-center gap-2">
+                      {activeSlot?.color_hex && (
+                        <span
+                          className="inline-block h-3 w-3 shrink-0 rounded-sm border border-[var(--color-border)]"
+                          style={{
+                            backgroundColor: `#${activeSlot.color_hex.slice(0, 6)}`,
+                          }}
+                        />
+                      )}
+                      <span className="font-mono text-sm text-[var(--color-text)]">
+                        {activeSlot?.type ?? "—"}
+                      </span>
+                    </div>
+                    {activeSlot?.sub_brand && (
+                      <div className="text-[11px] text-[var(--color-muted)]">
+                        {activeSlot.sub_brand}
+                      </div>
+                    )}
+                    <div className="text-[10px] text-[var(--color-muted)]">
+                      tray{" "}
+                      {printerState.active_tray === 254
+                        ? "external"
+                        : printerState.active_tray}
+                      {activeSlot?.tray_info_idx
+                        ? ` · ${activeSlot.tray_info_idx}`
+                        : ""}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-[var(--color-muted)]">
+                      Build plate
+                    </div>
+                    <div className="mt-1 font-mono text-sm text-[var(--color-text)]">
+                      {detectedBedTypeSlicer || "—"}
+                    </div>
+                    <div className="text-[10px] text-[var(--color-muted)]">
+                      {printerState.bed_type_slicer
+                        ? "from printer"
+                        : "from config (firmware doesn't report)"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-[var(--color-muted)]">
+                      Nozzle
+                    </div>
+                    <div className="mt-1 font-mono text-sm text-[var(--color-text)]">
+                      {printerState.nozzle_diameter_mm
+                        ? `${printerState.nozzle_diameter_mm.toFixed(1)} mm`
+                        : "—"}
+                    </div>
+                    {printerState.nozzle_type && (
+                      <div className="text-[10px] text-[var(--color-muted)]">
+                        {printerState.nozzle_type}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
           </section>
 
           {/* slice estimate */}

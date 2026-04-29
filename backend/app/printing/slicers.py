@@ -123,37 +123,157 @@ class BambuStudioConfig:
         return asdict(self)
 
 
-# Per-preset Bambu Studio process tweaks. Bambu Studio has its own
-# "Standard / Fine / Strong" process profile names that ship with the
-# install, but they vary by version, so we set explicit values via
-# CLI key=val overrides. Slicer-specific keys live here, behind the
-# preset id which is what the rest of the app speaks.
-_BAMBU_PRESET_OVERRIDES: dict[str, dict[str, str]] = {
-    "strong": {
-        "layer_height": "0.28",
-        "first_layer_height": "0.3",
-        "sparse_infill_density": "30%",
-        "wall_loops": "4",
-        "top_shell_layers": "5",
-        "bottom_shell_layers": "4",
-    },
-    "standard": {
-        "layer_height": "0.2",
-        "first_layer_height": "0.2",
-        "sparse_infill_density": "15%",
-        "wall_loops": "3",
-        "top_shell_layers": "4",
-        "bottom_shell_layers": "3",
-    },
-    "fine": {
-        "layer_height": "0.12",
-        "first_layer_height": "0.16",
-        "sparse_infill_density": "15%",
-        "wall_loops": "3",
-        "top_shell_layers": "5",
-        "bottom_shell_layers": "4",
-    },
+# Map our preset ids to Bambu Studio's *shipped* process profile names.
+# Bambu's CLI doesn't accept inline `--<setting> <value>` overrides;
+# the only way in is a JSON profile passed via `--load-settings`. So
+# each preset points at a profile that already lives on disk under
+# `resources/profiles/BBL/process/`. We pick X1C 0.4mm-nozzle profiles
+# by default — the user's printer config can override per machine.
+#
+# These names are version-stable: Bambu Studio has shipped Standard /
+# Strength / Fine names for years and Bambu's own UI relies on them
+# remaining unchanged.
+_BAMBU_PRESET_PROCESS_NAMES: dict[str, str] = {
+    "standard": "0.20mm Standard @BBL X1C",
+    "strong":   "0.20mm Strength @BBL X1C",
+    "fine":     "0.12mm Fine @BBL X1C",
 }
+
+# Default machine + filament profiles for the X1C 0.4mm nozzle —
+# applied when the user hasn't pinned specific profile names in
+# Settings. Both ship with every Bambu Studio install.
+_BAMBU_DEFAULT_MACHINE_NAME = "Bambu Lab X1 Carbon 0.4 nozzle"
+_BAMBU_DEFAULT_FILAMENT_NAME = "Bambu PLA Basic @BBL X1C"
+
+
+# Map a Bambu material code (from the printer's MQTT report — `tray_type`
+# or `tray_info_idx`) to a filament profile name suffix. We append the
+# printer's profile (e.g. "@BBL X1C") at lookup time, so the same map
+# works for any compatible machine.
+#
+# Bambu's `tray_info_idx` is the most reliable identifier — it's a stable
+# code per filament SKU. The first 3 letters say the type ("GFA" = PLA,
+# "GFG" = PETG, "GFB" = ABS, ...) and the rest is the brand/variant.
+_BAMBU_TRAY_IDX_PREFIX_TO_FAMILY: dict[str, str] = {
+    "GFA": "PLA",
+    "GFB": "ABS",
+    "GFC": "ASA",
+    "GFG": "PETG",
+    "GFL": "PLA",   # PLA-CF / specialty PLAs
+    "GFN": "PA",    # Nylon
+    "GFP": "PC",
+    "GFS": "PVA",
+    "GFT": "TPU",
+    "GFU": "PET-CF",
+}
+
+
+# Specific tray_info_idx → exact filament profile name. Used when we
+# can pin the precise match (eg. Bambu Basic vs. Matte vs. Silk). Falls
+# back to a generic of-family name when the idx isn't here.
+_BAMBU_TRAY_IDX_EXACT: dict[str, str] = {
+    "GFA00": "Bambu PLA Basic",
+    "GFA01": "Bambu PLA Matte",
+    "GFA02": "Bambu PLA Silk",
+    "GFA03": "Bambu PLA Tough",
+    "GFA04": "Bambu PLA Aero",
+    "GFA05": "Bambu PLA Galaxy",
+    "GFA08": "Bambu PLA Marble",
+    "GFA11": "Bambu PLA Metal",
+    "GFA12": "Bambu PLA Glow",
+    "GFA15": "Bambu PLA Dynamic",
+    "GFA50": "Bambu PLA-CF",
+    "GFB00": "Bambu ABS",
+    "GFB50": "Bambu ABS-GF",
+    "GFC00": "Bambu ASA",
+    "GFC50": "Bambu ASA-CF",
+    "GFG00": "Bambu PETG HF",
+    "GFG01": "Bambu PETG Translucent",
+    "GFG02": "Bambu PETG Basic",
+    "GFG50": "Bambu PETG-CF",
+    "GFP00": "Bambu PC",
+    "GFP01": "Bambu PC FR",
+    "GFN03": "Bambu PA-CF",
+    "GFN04": "Bambu PAHT-CF",
+    "GFN05": "Bambu PA6-CF",
+    "GFN08": "Bambu PA6-GF",
+    "GFU00": "Bambu PET-CF",
+    # GFG99 / unknowns fall back to the per-family default below.
+}
+
+
+# Per-material-family fallback profile when `tray_info_idx` is unknown
+# (e.g. third-party spool reported as "GFG99"). These are the actual
+# profile names Bambu ships for the X1C — verified by `ls` against
+# `resources/profiles/BBL/filament/`. There aren't "Generic <material>"
+# profiles for the common families (PLA / PETG / ABS / ASA / PC), so we
+# fall back to the matching Bambu-branded base profile, which is the
+# closest analogue at sane temps.
+_BAMBU_FAMILY_FALLBACK: dict[str, str] = {
+    "PLA":   "Bambu PLA Basic",
+    "ABS":   "Bambu ABS",
+    "ASA":   "Bambu ASA",
+    "PETG":  "Bambu PETG Basic",
+    "PC":    "Bambu PC",
+    "PA":    "Bambu PA-CF",
+    "TPU":   "Generic TPU for AMS",   # the only generic TPU Bambu ships
+    "PET-CF": "Bambu PET-CF",
+}
+
+
+def _filament_suffix_for_machine(machine_name: str) -> str:
+    """Translate a machine profile name like
+    "Bambu Lab X1 Carbon 0.4 nozzle" into the filament-naming suffix
+    Bambu uses: "@BBL X1C". Falls back to "@BBL X1C" when we can't
+    parse the machine name.
+    """
+    n = (machine_name or "").lower()
+    if "x1 carbon" in n or "x1c" in n:
+        return "@BBL X1C"
+    if "x1e" in n:
+        return "@BBL X1E"
+    if "p1s" in n:
+        return "@BBL P1S"
+    if "p1p" in n:
+        return "@BBL P1P"
+    if "a1 mini" in n:
+        return "@BBL A1M"
+    if "a1" in n:
+        return "@BBL A1"
+    return "@BBL X1C"
+
+
+def _filament_name_for_slot(
+    *,
+    tray_type: str,
+    tray_info_idx: str,
+    machine_suffix: str,
+) -> str:
+    """Pick the closest Bambu-shipped filament profile name for a slot
+    the printer reported. Returns just the profile name (no `.json`).
+    Slicer's `_resolve_profile` does the existence check — when the
+    chosen name doesn't exist on disk the slicer falls back to its
+    configured default."""
+    suffix = machine_suffix or "@BBL X1C"
+    # 1. Exact tray_info_idx match wins (most accurate).
+    base = _BAMBU_TRAY_IDX_EXACT.get(tray_info_idx)
+    if base:
+        return f"{base} {suffix}"
+    # 2. Family by tray_info_idx prefix.
+    if tray_info_idx and len(tray_info_idx) >= 3:
+        family = _BAMBU_TRAY_IDX_PREFIX_TO_FAMILY.get(tray_info_idx[:3])
+        if family:
+            base = _BAMBU_FAMILY_FALLBACK.get(family)
+            if base:
+                return f"{base} {suffix}"
+    # 3. Family by tray_type (PLA / PETG / ABS / ...).
+    fam = (tray_type or "").upper()
+    base = _BAMBU_FAMILY_FALLBACK.get(fam)
+    if base:
+        return f"{base} {suffix}"
+    # 4. Last resort — Bambu PLA Basic. Slicer will surface a clear
+    # error if even this is missing.
+    return f"Bambu PLA Basic {suffix}"
 
 
 # Map our generic override keys → Bambu Studio config keys. Anything
@@ -247,6 +367,155 @@ class BambuStudioSlicer(Slicer):
 
     # -------- slice ----------------------------------------------------
 
+    def _profile_root(self, cli_path: str) -> Path | None:
+        """Walk up from the CLI binary to find the BBL profiles directory.
+
+        Bambu Studio installs the slicer under
+        `<install>/bambu-studio.exe` and the system profiles under
+        `<install>/resources/profiles/BBL/`. We try a couple of layouts so
+        the discovery still works on Mac (`.app` bundle) and Linux."""
+        cli = Path(cli_path).resolve()
+        # Windows / Linux layout: cli sits in <install>/, profiles under <install>/resources/profiles/BBL/
+        for parent in (cli.parent, cli.parent.parent):
+            cand = parent / "resources" / "profiles" / "BBL"
+            if cand.is_dir():
+                return cand
+        # Mac .app bundle: BambuStudio.app/Contents/MacOS/BambuStudio,
+        # profiles under .app/Contents/Resources/profiles/BBL/.
+        for ancestor in cli.parents:
+            cand = ancestor / "Resources" / "profiles" / "BBL"
+            if cand.is_dir():
+                return cand
+        return None
+
+    def _resolve_profile(self, root: Path, kind: str, name: str) -> Path | None:
+        """Find a profile JSON by name under <root>/<kind>/. Returns None
+        when missing — callers fall back to defaults."""
+        if not name:
+            return None
+        path = root / kind / f"{name}.json"
+        return path if path.exists() else None
+
+    def _resolve_inheritance_chain(
+        self, root: Path, kind: str, name: str,
+    ) -> list[Path]:
+        """Walk the profile's `inherits` field up to the root and return
+        the chain in parent→child order. Empty list if the leaf doesn't
+        exist."""
+        chain: list[Path] = []
+        seen: set[str] = set()
+        current = name
+        while current and current not in seen:
+            seen.add(current)
+            path = root / kind / f"{current}.json"
+            if not path.exists():
+                break
+            chain.append(path)
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                break
+            current = (data.get("inherits") or "").strip()
+        chain.reverse()
+        return chain
+
+    def _flatten_filament_profile(
+        self, root: Path, name: str, out_dir: Path,
+    ) -> Path | None:
+        """Resolve `name` plus its `inherits` chain into a single flat
+        filament JSON written to `out_dir`. Returns the temp file path
+        or None if the leaf can't be found.
+
+        Why we flatten ourselves rather than passing the chain: Bambu
+        Studio's CLI interprets each --load-filaments entry as a
+        SEPARATE filament slot (multi-material setup), not as
+        inheritance. So loading the chain gets you N filaments instead
+        of one merged profile. We do the merge by deep-copying the
+        root parent and then layering each child on top in
+        parent→child order. The result is a self-contained leaf with
+        no `inherits` field, which the slicer can ingest as a single
+        filament without ambiguity.
+        """
+        chain = self._resolve_inheritance_chain(root, "filament", name)
+        if not chain:
+            return None
+        merged: dict = {}
+        for p in chain:
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            for k, v in data.items():
+                # `inherits` is meaningless on a flattened profile — drop
+                # it so Bambu doesn't try (and fail) to chase the chain
+                # again from the temp file's location.
+                if k == "inherits":
+                    continue
+                merged[k] = v
+        merged["from"] = "system"
+        # Keep the leaf's name so `compatible_printers` matching still
+        # works against the printer profile we're loading.
+        merged["name"] = chain[-1].stem
+        suffix = uuid.uuid4().hex[:6]
+        out_path = out_dir / f"filament-flat-{suffix}.json"
+        out_path.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+        return out_path
+
+    def _apply_overrides_to_process(
+        self,
+        base_process_path: Path,
+        overrides: list[SliceOverride],
+        bed_type: str,
+        out_dir: Path,
+    ) -> Path:
+        """Generate a process profile JSON that derives from the system
+        profile and adds the user/agent overrides + the build plate.
+
+        Bambu Studio's CLI accepts settings only through profile JSONs
+        (no inline `--<key> <value>` flags), so anything we want to
+        change at slice time has to land on the JSON. Two sources of
+        change feed in here:
+
+          1. Agent / user overrides (key→value, free-form).
+          2. The current build plate (`curr_bed_type`) — must be set
+             explicitly because the X1C's MQTT report doesn't carry it
+             on current firmware, so we either get it from the
+             auto-detected printer state or from the printer's
+             `default_bed_type` config field.
+
+        We keep the system machine profile untouched — all changes are
+        process-side. `compatible_printers` stays as-is so the system
+        machine still matches.
+        """
+        try:
+            process = json.loads(base_process_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            process = {}
+
+        if bed_type:
+            # `curr_bed_type` is what Bambu Studio's GUI sets when the
+            # user picks a plate. The slicer reads this to look up
+            # initial-layer bed temp from the filament profile.
+            process["curr_bed_type"] = bed_type
+
+        for ov in overrides:
+            key = _BAMBU_OVERRIDE_KEY_ALIASES.get(ov.key, ov.key)
+            value = _coerce_bambu_value(key, ov.value)
+            existing = process.get(key)
+            # Bambu stores per-extruder settings as parallel arrays;
+            # broadcast our single value across all entries to match.
+            if isinstance(existing, list) and existing:
+                process[key] = [value] * len(existing)
+            else:
+                process[key] = value
+        # Unique name so Bambu's profile registry treats this as a fresh
+        # entry rather than trying to merge with the system profile.
+        suffix = uuid.uuid4().hex[:6]
+        process["name"] = f"{process.get('name', base_process_path.stem)} (override-{suffix})"
+        out_path = out_dir / f"process-override-{suffix}.json"
+        out_path.write_text(json.dumps(process, indent=2), encoding="utf-8")
+        return out_path
+
     def auto_orient_and_slice(
         self,
         model_paths: list[Path],
@@ -266,52 +535,139 @@ class BambuStudioSlicer(Slicer):
             return SliceResult(ok=False, error=cli_or_reason)
         cli = cli_or_reason
 
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_3mf = out_dir / f"sliced-{uuid.uuid4().hex[:8]}.3mf"
+        profile_root = self._profile_root(cli)
+        if profile_root is None:
+            return SliceResult(ok=False, error=(
+                "found Bambu Studio CLI but couldn't locate its profile "
+                "directory (resources/profiles/BBL/). Install may be corrupt."
+            ))
 
-        # Build the CLI argv. Bambu Studio's CLI accepts a sequence of
-        # mode flags + config overrides. The high-level flow:
-        #
-        #   <cli> --orient 1 --slice 0 --export-3mf <out.3mf>
-        #         [--load-settings <printer.json>;<process.json>;<filament.json>]
-        #         [--load-filaments <filament.json>]
-        #         <model.stl> [<model2.stl>...]
-        #
-        # We start by exporting an oriented .3mf (so the agent / user can
-        # see the orientation), then a second pass slices that 3mf in
-        # place with the preset overrides.
-        argv: list[str] = [cli]
-
-        # Profiles. Caller can pin them through `printer_hint` (preferred,
-        # so each Bambu printer config carries its own machine choice) or
-        # via the slicer's own static config.
-        printer_profile = (
-            (printer_hint or {}).get("printer_profile")
+        # Resolve machine / process / filament profiles.
+        # Each can be overridden via the printer config or the slicer's
+        # own config; otherwise we fall back to X1C-0.4mm + Bambu PLA
+        # Basic + the per-preset process choice.
+        hint = printer_hint or {}
+        machine_name = (
+            hint.get("printer_profile")
             or self.config.printer_profile
+            or _BAMBU_DEFAULT_MACHINE_NAME
         )
-        process_profile = (
-            (printer_hint or {}).get("process_profile")
+        process_name = (
+            hint.get("process_profile")
             or self.config.process_profile
+            or _BAMBU_PRESET_PROCESS_NAMES.get(preset, _BAMBU_PRESET_PROCESS_NAMES["standard"])
         )
-        filament_profile = (
-            (printer_hint or {}).get("filament_profile")
-            or self.config.filament_profile
+        # Auto-detected filament info wins over a hard-coded
+        # filament_profile setting. The printer's MQTT report tells us
+        # exactly what's loaded (PLA / PETG / ABS / ...) so we map that
+        # to the matching system profile name. Falls through to the
+        # hard-coded filament_profile / default when no detection ran.
+        detected_tray_type = str(hint.get("detected_tray_type") or "").strip()
+        detected_tray_idx = str(hint.get("detected_tray_info_idx") or "").strip()
+        if detected_tray_type or detected_tray_idx:
+            # Strip "Bambu Lab " prefix off the machine name to get the
+            # filament profile suffix. "Bambu Lab X1 Carbon 0.4 nozzle"
+            # -> "@BBL X1C". This matches Bambu's profile naming.
+            suffix = _filament_suffix_for_machine(machine_name)
+            filament_name = _filament_name_for_slot(
+                tray_type=detected_tray_type,
+                tray_info_idx=detected_tray_idx,
+                machine_suffix=suffix,
+            )
+        else:
+            filament_name = (
+                hint.get("filament_profile")
+                or self.config.filament_profile
+                or _BAMBU_DEFAULT_FILAMENT_NAME
+            )
+
+        # Build plate — auto-detected when MQTT reported it, otherwise
+        # the printer config's user-set fallback.
+        bed_type = str(
+            hint.get("detected_bed_type_slicer")
+            or hint.get("default_bed_type")
+            or ""
+        ).strip()
+
+        machine_path = self._resolve_profile(profile_root, "machine", machine_name)
+        process_path = self._resolve_profile(profile_root, "process", process_name)
+        # Filament: leaf-only loads collapse to PLA defaults for non-PLA
+        # materials because Bambu's CLI doesn't traverse `inherits`. We
+        # build a flattened temp profile that bakes the whole chain into
+        # one JSON so temps and material flags resolve correctly.
+        filament_leaf_path = self._resolve_profile(profile_root, "filament", filament_name)
+
+        missing: list[str] = []
+        if machine_path is None:
+            missing.append(f"machine {machine_name!r}")
+        if process_path is None:
+            missing.append(f"process {process_name!r}")
+        if filament_leaf_path is None:
+            missing.append(f"filament {filament_name!r}")
+        if missing:
+            return SliceResult(ok=False, error=(
+                f"could not find Bambu Studio profile(s): {', '.join(missing)}. "
+                f"Looked in {profile_root}. Confirm Bambu Studio is fully "
+                "installed; if you customised profile names in Settings, "
+                "make sure they match what's on disk."
+            ))
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # Bambu's CLI emits sliced output as a `.gcode.3mf` file (a 3MF
+        # archive carrying the gcode plus plate metadata). Match that
+        # naming so the printer's "Print Now" / our LAN driver recognise
+        # it as a sliced job.
+        out_3mf = out_dir / f"sliced-{uuid.uuid4().hex[:8]}.gcode.3mf"
+
+        # Process profile is regenerated whenever we have overrides OR
+        # need to set the build plate. Without overrides AND without a
+        # bed_type override we point Bambu directly at the system file
+        # — that's the documented happy path and avoids any merge tricks.
+        effective_process_path = process_path
+        if overrides or bed_type:
+            effective_process_path = self._apply_overrides_to_process(
+                process_path, overrides, bed_type, out_dir,
+            )
+
+        # The documented one-shot invocation per Bambu's wiki:
+        #   bambu-studio --orient 1 --arrange 1 --slice 1 \
+        #                --load-settings "machine.json;process.json" \
+        #                --load-filaments "filament.json" \
+        #                --allow-newer-file \
+        #                --export-3mf out.gcode.3mf \
+        #                model.stl
+        #
+        # --orient 1 picks the printable side as "down" so overhangs
+        # don't tip the part into a print failure (CADQuery emits
+        # whatever orientation the script wrote, which is rarely the
+        # best for an FDM printer). --arrange 1 places the oriented
+        # part on the bed. --slice 1 then slices plate 1 (the first
+        # and, for our single-object exports, only plate).
+        # --allow-newer-file lets Bambu accept 3MFs whose minor version
+        # is newer than the slicer's parser expects — CADQuery's
+        # exporter sometimes ships a slightly newer revision and this
+        # avoids a hard reject.
+        # See: https://github.com/bambulab/BambuStudio/wiki/Command-Line-Usage
+        # Always pass a flattened single-file filament profile —
+        # bypasses Bambu CLI's broken inheritance resolution AND the
+        # multi-slot interpretation of multi-path --load-filaments.
+        flat_filament = self._flatten_filament_profile(
+            profile_root, filament_name, out_dir,
         )
-        load_pieces = [p for p in (printer_profile, process_profile, filament_profile) if p]
-        if load_pieces:
-            argv.extend(["--load-settings", ";".join(load_pieces)])
-
-        # Preset → key=value overrides → user/agent overrides (last wins).
-        merged: dict[str, str] = {}
-        merged.update(_BAMBU_PRESET_OVERRIDES.get(preset, {}))
-        for ov in overrides:
-            key = _BAMBU_OVERRIDE_KEY_ALIASES.get(ov.key, ov.key)
-            merged[key] = _coerce_bambu_value(key, ov.value)
-        for k, v in merged.items():
-            argv.extend([f"--{k}", v])
-
-        argv.extend(["--orient", "1", "--slice", "0"])
-        argv.extend(["--export-3mf", str(out_3mf)])
+        if flat_filament is None:
+            return SliceResult(ok=False, error=(
+                f"failed to flatten filament profile {filament_name!r}"
+            ))
+        argv = [
+            cli,
+            "--allow-newer-file",
+            "--load-settings", f"{machine_path};{effective_process_path}",
+            "--load-filaments", str(flat_filament),
+            "--orient", "1",
+            "--arrange", "1",
+            "--slice", "1",
+            "--export-3mf", str(out_3mf),
+        ]
         argv.extend(str(p) for p in model_paths)
 
         try:
@@ -325,40 +681,33 @@ class BambuStudioSlicer(Slicer):
 
         log = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
         if proc.returncode != 0 or not out_3mf.exists():
+            # Friendly handling for the well-known v2.04 / v2.05 CLI bug
+            # (https://github.com/bambulab/BambuStudio/issues/9636) — a
+            # single-extruder slice errors out with `nozzle_volume_type
+            # not found` and segfaults. Surface a clear next step rather
+            # than a raw 0xC0000005 dump.
+            if "nozzle_volume_type not found" in log:
+                return SliceResult(
+                    ok=False,
+                    error=(
+                        "Bambu Studio CLI v2.04+ has a known bug where "
+                        "single-extruder slicing crashes with "
+                        "'nozzle_volume_type not found' "
+                        "(github.com/bambulab/BambuStudio/issues/9636). "
+                        "The slice itself is fine; the CLI is the problem. "
+                        "Workarounds: install OrcaSlicer (a community fork "
+                        "that fixed this), or downgrade Bambu Studio to a "
+                        "pre-2.04 release. Either way, re-point "
+                        "Settings -> Printers -> CLI path at the working "
+                        "binary."
+                    ),
+                    log=log,
+                )
             return SliceResult(
                 ok=False,
                 error=(
-                    f"Bambu Studio CLI failed (exit {proc.returncode}). "
+                    f"Bambu Studio CLI slice failed (exit {proc.returncode}). "
                     f"Last 600 chars of log:\n{log[-600:]}"
-                ),
-                log=log,
-            )
-
-        # Second pass: actually slice the oriented 3mf in place.
-        slice_argv: list[str] = [cli]
-        if load_pieces:
-            slice_argv.extend(["--load-settings", ";".join(load_pieces)])
-        for k, v in merged.items():
-            slice_argv.extend([f"--{k}", v])
-        slice_argv.extend(["--slice", "0", str(out_3mf)])
-        try:
-            sproc = subprocess.run(
-                slice_argv, capture_output=True, text=True, timeout=300,
-            )
-        except subprocess.TimeoutExpired:
-            return SliceResult(
-                ok=False,
-                error="Bambu Studio CLI slice pass timed out (>5 min)",
-                log=log,
-            )
-        slice_log = (sproc.stdout or "") + ("\n" + sproc.stderr if sproc.stderr else "")
-        log += "\n--- slice pass ---\n" + slice_log
-        if sproc.returncode != 0:
-            return SliceResult(
-                ok=False,
-                error=(
-                    f"Bambu Studio slice failed (exit {sproc.returncode}). "
-                    f"Last 600 chars of log:\n{slice_log[-600:]}"
                 ),
                 log=log,
             )
