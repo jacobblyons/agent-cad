@@ -27,12 +27,14 @@ sees the same project files), so context carries forward.
 
 ## How to invoke
 
-Run the launcher with the repo's venv. It opens the desktop window
-and waits — the command keeps running for as long as the app is open,
-so launch it in the background.
+Run the launcher from the repo root. It self-bootstraps into the
+project venv (`.venv/bin/python` on macOS / Linux,
+`.venv\Scripts\python.exe` on Windows), opens the desktop window, and
+waits — the command keeps running for as long as the app is open, so
+launch it in the background.
 
 ```bash
-.venv/Scripts/python.exe run.py
+python run.py
 ```
 
 Optional: pass `--prod` to run the built bundle (faster startup, no
@@ -41,11 +43,8 @@ Vite dev server). Without `--prod` it spins up the Vite dev server on
 might have unsaved changes.
 
 ```bash
-.venv/Scripts/python.exe run.py --prod
+python run.py --prod
 ```
-
-The launcher self-bootstraps into the project venv if invoked with
-the system Python, so just `python run.py` works too.
 
 ## Pre-launch checklist
 
@@ -92,7 +91,7 @@ you can read it later if something goes wrong.
 
 ```
 Bash {
-  command: ".venv/Scripts/python.exe run.py",
+  command: "python run.py",
   description: "Launch Agent CAD desktop app",
   run_in_background: true
 }

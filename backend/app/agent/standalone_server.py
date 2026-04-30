@@ -17,7 +17,10 @@ State model:
     the agent's behaviour mirrors the GUI's.
 
 Usage (when launched by Claude Code via .mcp.json):
-    .venv/Scripts/python.exe -m app.agent.standalone_server
+    python -m app.agent.standalone_server
+    (the launcher in backend/scripts/mcp_server.py self-bootstraps into
+    .venv/bin/python on macOS / Linux or .venv\\Scripts\\python.exe on
+    Windows, so callers don't need to know the venv path.)
 
 Optional CLI flags:
     --project <path>   open a project at startup (otherwise call
@@ -27,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import os
 import sys
@@ -64,6 +68,7 @@ from app.cad.project import (  # noqa: E402
 )
 from app.events import bus  # noqa: E402
 from app.printing import PRESETS  # noqa: E402
+from app.printing.camera import grab_frame as grab_camera_frame  # noqa: E402
 from app.printing.presets import lookup as lookup_preset  # noqa: E402
 from app.printing.state import PhaseState  # noqa: E402
 
@@ -495,6 +500,36 @@ async def _tool_leave_print_phase(args: dict) -> dict:  # noqa: ARG001
     return {"content": [{"type": "text", "text": "left print phase."}]}
 
 
+async def _tool_printer_camera_snapshot(args: dict) -> dict:
+    """Grab a single frame from the configured printer's camera.
+
+    Returns the PNG inline as MCP image content so the agent can see it
+    directly. Available regardless of phase — peeking at the camera
+    doesn't require entering print phase, and being able to ask "is it
+    actually printing?" outside of print phase is the common case.
+    """
+    printer_id = (args.get("printer_id") or "").strip() or None
+    # Run the blocking RTSPS read off the event loop so we don't stall
+    # the MCP transport while FFmpeg negotiates the stream.
+    res = await asyncio.to_thread(grab_camera_frame, printer_id=printer_id)
+    if not res.ok:
+        return {
+            "content": [{"type": "text", "text": f"[error] {res.error}"}],
+            "is_error": True,
+        }
+    label = res.printer_name or res.printer_id or "printer"
+    return {
+        "content": [
+            {"type": "text", "text": f"live frame from {label}"},
+            {
+                "type": "image",
+                "data": base64.b64encode(res.png_bytes or b"").decode("ascii"),
+                "mimeType": "image/png",
+            },
+        ],
+    }
+
+
 _PROJECT_MGMT_TOOLS = [
     (
         "list_projects",
@@ -547,6 +582,17 @@ _PROJECT_MGMT_TOOLS = [
         "and the print tools refuse to run.",
         {},
         _tool_leave_print_phase,
+    ),
+    (
+        "printer_camera_snapshot",
+        "Grab one live PNG frame from the configured printer's chamber camera "
+        "and return it inline. Use this to confirm what the printer is actually "
+        "doing — \"is it still printing?\", \"did the part come loose?\", etc. "
+        "Available regardless of phase. Optional `printer_id` selects a "
+        "specific printer when multiple are configured (defaults to "
+        "`default_printer_id` from settings).",
+        {"printer_id": str},
+        _tool_printer_camera_snapshot,
     ),
 ]
 

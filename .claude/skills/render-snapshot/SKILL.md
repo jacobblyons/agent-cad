@@ -9,10 +9,10 @@ Render a CADQuery model to a PNG via the same backend code path the agent's snap
 
 ## How to invoke
 
-Run the CLI with the repo's venv. The output PNG path is printed to stdout on success; read it with the `Read` tool to view the image.
+Run the CLI with `python` from the repo root — the script self-bootstraps into the project venv (`.venv/bin/python` on macOS / Linux, `.venv\Scripts\python.exe` on Windows) so a bare `python` invocation Just Works regardless of platform. The output PNG path is printed to stdout on success; read it with the `Read` tool to view the image.
 
 ```bash
-.venv/Scripts/python.exe backend/scripts/render_snapshot.py <input> [options]
+python backend/scripts/render_snapshot.py <input> [options]
 ```
 
 `<input>` is either:
@@ -42,18 +42,18 @@ The viewer's `Snapshot` button copies the live camera as `position=[…], target
 
 ```bash
 # Quick iso check of a single script
-.venv/Scripts/python.exe backend/scripts/render_snapshot.py path/to/widget.py
+python backend/scripts/render_snapshot.py path/to/widget.py
 
 # Look at one object inside a project, from above
-.venv/Scripts/python.exe backend/scripts/render_snapshot.py \
+python backend/scripts/render_snapshot.py \
     ~/.agent-cad/projects/my-proj --object base_plate --view top
 
 # Re-render from the same angle the user has on screen
-.venv/Scripts/python.exe backend/scripts/render_snapshot.py path/to/widget.py \
+python backend/scripts/render_snapshot.py path/to/widget.py \
     --position 200 -180 140 --target 0 0 30 --up 0 0 1
 
 # Higher-resolution render to a specific path
-.venv/Scripts/python.exe backend/scripts/render_snapshot.py widget.py \
+python backend/scripts/render_snapshot.py widget.py \
     --view front --width 1600 --height 1200 --out /tmp/widget-front.png
 ```
 

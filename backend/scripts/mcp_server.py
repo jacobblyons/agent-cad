@@ -28,12 +28,13 @@ def main() -> int:
     venv_exe = "python.exe" if os.name == "nt" else "python"
     venv_py = repo_root / ".venv" / venv_subdir / venv_exe
 
-    # Re-exec in the venv if we're not already there. Use Path.resolve()
-    # to compare; sys.executable on a re-exec'd run will already match.
-    try:
-        already_in_venv = Path(sys.executable).resolve() == venv_py.resolve()
-    except OSError:
-        already_in_venv = False
+    # Re-exec in the venv if we're not already there. We can't compare
+    # Path.resolve() of sys.executable vs the venv's python — on macOS /
+    # Linux, .venv/bin/python is a symlink to the system Python, so both
+    # resolve to the same real path even when we're running outside the
+    # venv. Use sys.prefix vs sys.base_prefix instead: those diverge only
+    # inside a venv, regardless of how the interpreter was invoked.
+    already_in_venv = sys.prefix != sys.base_prefix
 
     if venv_py.exists() and not already_in_venv:
         sys.stderr.write(f"[agent-cad-mcp] re-exec via venv: {venv_py}\n")

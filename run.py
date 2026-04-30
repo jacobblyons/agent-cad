@@ -38,7 +38,11 @@ VENV_PY = ROOT / ".venv" / ("Scripts" if IS_WIN else "bin") / ("python.exe" if I
 def reexec_in_venv() -> None:
     if not VENV_PY.exists():
         return
-    if Path(sys.executable).resolve() == VENV_PY.resolve():
+    # On macOS / Linux, .venv/bin/python is a symlink back to the system
+    # Python, so resolve()-equality wrongly reports "already in venv"
+    # when we were actually invoked with the system interpreter. Use
+    # sys.prefix vs sys.base_prefix — diverges only inside a venv.
+    if sys.prefix != sys.base_prefix:
         return
     sys.exit(subprocess.call([str(VENV_PY), str(Path(__file__).resolve()), *sys.argv[1:]]))
 

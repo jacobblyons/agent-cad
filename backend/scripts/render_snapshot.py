@@ -4,6 +4,11 @@ VTK pipeline the agent's snapshot tool uses.
 Wraps `app.cad.script_runner.snapshot` so the model is loaded and rendered
 in a clean subprocess (matches the agent and viewer behaviour exactly).
 
+Self-bootstraps into the project venv if invoked with the system Python,
+so a bare `python backend/scripts/render_snapshot.py ...` works on every
+platform without the caller having to know whether the venv lives at
+`.venv/bin/python` (macOS / Linux) or `.venv\\Scripts\\python.exe` (Windows).
+
 Examples:
     # Single-script model, isometric preset:
     python backend/scripts/render_snapshot.py path/to/widget.py --view iso
@@ -19,12 +24,33 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import tempfile
 import uuid
 from pathlib import Path
 
-_BACKEND = Path(__file__).resolve().parents[1]
+_HERE = Path(__file__).resolve()
+_BACKEND = _HERE.parents[1]
+_REPO_ROOT = _HERE.parents[2]
+
+
+def _reexec_in_venv() -> None:
+    """If a project venv exists and we're not already inside it, re-exec
+    so VTK / cadquery / OCP resolve. Mirrors backend/scripts/mcp_server.py."""
+    venv_subdir = "Scripts" if os.name == "nt" else "bin"
+    venv_exe = "python.exe" if os.name == "nt" else "python"
+    venv_py = _REPO_ROOT / ".venv" / venv_subdir / venv_exe
+    # On macOS / Linux .venv/bin/python is a symlink to the system Python,
+    # so resolve()-equality wrongly reports "already in venv". Compare
+    # sys.prefix vs sys.base_prefix instead — those diverge only inside
+    # a venv, regardless of how the interpreter was invoked.
+    already_in_venv = sys.prefix != sys.base_prefix
+    if venv_py.exists() and not already_in_venv:
+        os.execv(str(venv_py), [str(venv_py), str(_HERE), *sys.argv[1:]])
+
+
+_reexec_in_venv()
 sys.path.insert(0, str(_BACKEND))
 
 from app.cad.script_runner import snapshot  # noqa: E402

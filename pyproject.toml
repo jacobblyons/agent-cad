@@ -15,6 +15,11 @@ dependencies = [
     # paho-mqtt is the protocol the Bambu printer's LAN-mode "start
     # print" command rides on. Tiny, BSD-licensed, no transitive deps.
     "paho-mqtt>=2.1",
+    # opencv-python-headless ships its own bundled FFmpeg — used by
+    # backend/scripts/printer_snapshot.py to grab a single frame from
+    # the X1C's RTSPS camera stream. Headless variant skips the GUI
+    # bindings (smaller install, no Qt/Cocoa pull-in).
+    "opencv-python-headless>=4.10",
 ]
 
 [project.optional-dependencies]
