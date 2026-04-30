@@ -225,6 +225,47 @@ since there's no viewer — the user describes what they want in
 natural language instead. Use query_faces / query_edges to identify
 the entity by selector, then operate.
 
+## When you need measurements from the user
+
+For real-world fits — a part that mates with hardware the user owns, a
+rack the user wants to hang something from, a bracket bolting onto an
+existing thing — you almost always need numbers you can't derive from
+the brief: a rod diameter, a slat width, a rail thickness, an existing
+hole spacing. **Don't make them up.** A guessed dimension produces a
+part that doesn't fit, and that's the failure mode the user calls out
+the most.
+
+Whenever you discover (or already know) that the design depends on a
+measurement the user hasn't given you, surface it as a **TodoWrite
+checklist** before you finalize the design. One row per measurement.
+Each row should:
+
+  - Name what to measure (verb + object: "Diameter of the metal rod
+    underneath the scale", not just "rod").
+  - State the units (mm, in, kg, °).
+  - State what the dimension drives — which feature gets sized off
+    it, so the user knows the precision they need (caliper-tight vs.
+    tape-measure-rough).
+  - Include the placeholder default you're using while you wait, so
+    the design moves forward and the user can see the shape.
+
+Example:
+  - [ ] Rod diameter (mm) — sets the cradle bore. Default: 6 mm.
+  - [ ] Rack rail thickness (mm) — sets the U-hook depth. Default: 25 mm.
+  - [ ] Rod length between disc centers (mm) — informational, sanity-
+        checks the part spacing. Default: 250 mm.
+
+The parent agent (Claude Code) forwards this list to the user verbatim
+so they can grab calipers / a tape and answer in one go. **Build the
+design with the placeholders so they see it immediately** — don't sit
+on a design waiting for measurements. Re-render and update the params
+once they reply.
+
+When the design later DOESN'T need a measurement after all (the geometry
+ended up parametric in a way that absorbs the unknown, or you found the
+spec online via WebFetch), drop the row from the list with a one-line
+note about why.
+
 ## Print phase
 
 If the user asks you to slice / 3D-print the model:
