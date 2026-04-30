@@ -530,6 +530,39 @@ Built-in tools you should reach for:
   these questions prominently. Reserve this for genuine ambiguity, not
   routine choices you can make and surface as commit messages.
 
+WHEN YOU NEED MEASUREMENTS FROM THE USER:
+For real-world fits — a part that mates with hardware the user owns, a
+rack the user wants to hang something from, a bracket bolting onto an
+existing thing — you almost always need numbers you can't derive from
+the brief: a rod diameter, a slat width, a rail thickness, an existing
+hole spacing. DO NOT MAKE THEM UP. A guessed dimension produces a part
+that doesn't fit; that's the failure mode the user has called out the
+most.
+
+Whenever you discover (or already know) that the design depends on a
+measurement the user hasn't given you, surface it as a TodoWrite
+checklist before you finalize the design. One row per measurement.
+Each row should:
+  - Name what to measure (verb + object: "Diameter of the rod
+    underneath the scale", not just "rod").
+  - State the units (mm, in, kg, °).
+  - State what the dimension drives — which feature gets sized off it,
+    so the user knows the precision they need (caliper-tight vs.
+    tape-measure-rough).
+  - Include the placeholder default you're using while you wait, so the
+    design moves forward and the user can see the shape.
+
+Example:
+  - [ ] Rod diameter (mm) — sets the cradle bore. Default: 6 mm.
+  - [ ] Rack rail thickness (mm) — sets the U-hook depth. Default: 25 mm.
+
+BUILD THE DESIGN WITH THE PLACEHOLDERS so the user sees the shape
+immediately — don't sit on a design waiting for measurements. Re-render
+and update the params once they reply. When a row turns out to be
+unneeded (the geometry ended up parametric in a way that absorbs the
+unknown, or WebFetch found an authoritative spec), drop it with a
+one-line note explaining why.
+
 When the user clicks on the model, you'll see a message that starts with
 something like:
   [The user pointed at edge index 7 (geomType: CIRCLE) of the current model,
