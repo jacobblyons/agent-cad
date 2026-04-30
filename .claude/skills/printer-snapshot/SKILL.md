@@ -11,10 +11,10 @@ Backed by `BambuLabPrinter.fetch_snapshot()`, which shells out to the bundled `i
 
 ## How to invoke
 
-Run from the repo root with the project venv:
+Run from the repo root with `python` — the script self-bootstraps into the project venv (`.venv/bin/python` on macOS / Linux, `.venv\Scripts\python.exe` on Windows) so a bare invocation works on every platform.
 
 ```bash
-.venv/Scripts/python.exe backend/scripts/printer_snapshot.py [options]
+python backend/scripts/printer_snapshot.py [options]
 ```
 
 With no options, uses the default printer from `~/.agent-cad/settings.json`.
@@ -23,14 +23,14 @@ With no options, uses the default printer from `~/.agent-cad/settings.json`.
 
 ```bash
 # Default printer, snapshot to a temp file
-.venv/Scripts/python.exe backend/scripts/printer_snapshot.py
+python backend/scripts/printer_snapshot.py
 
 # A specific printer in settings, fixed output path
-.venv/Scripts/python.exe backend/scripts/printer_snapshot.py \
+python backend/scripts/printer_snapshot.py \
     --printer-id main --out /tmp/printer-now.jpg
 
 # Inline credentials (handy when troubleshooting auth before saving the printer to settings)
-.venv/Scripts/python.exe backend/scripts/printer_snapshot.py \
+python backend/scripts/printer_snapshot.py \
     --ip 192.168.1.50 --access-code 12345678
 ```
 

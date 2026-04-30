@@ -17,7 +17,10 @@ State model:
     the agent's behaviour mirrors the GUI's.
 
 Usage (when launched by Claude Code via .mcp.json):
-    .venv/Scripts/python.exe -m app.agent.standalone_server
+    python -m app.agent.standalone_server
+    (the launcher in backend/scripts/mcp_server.py self-bootstraps into
+    .venv/bin/python on macOS / Linux or .venv\\Scripts\\python.exe on
+    Windows, so callers don't need to know the venv path.)
 
 Optional CLI flags:
     --project <path>   open a project at startup (otherwise call
