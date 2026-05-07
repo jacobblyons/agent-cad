@@ -1,0 +1,28 @@
+# Default: let git detect text vs binary, normalize to LF in the repo.
+* text=auto eol=lf
+
+# Shell scripts MUST be LF — bash and macOS Finder refuse CRLF in
+# shebang lines and silently break when scripts contain \r.
+*.sh        text eol=lf
+*.command   text eol=lf
+
+# PowerShell / batch are happiest as CRLF on Windows.
+*.ps1       text eol=crlf
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+
+# Treat known binaries as binary — never line-end-normalize.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.pdf       binary
+*.zip       binary
+*.tar.gz    binary
+*.gltf      binary
+*.glb       binary
+*.stl       binary
+*.step      binary
+*.stp       binary
+*.3mf       binary

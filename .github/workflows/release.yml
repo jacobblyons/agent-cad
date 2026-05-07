@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build cross-platform release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          tag="${{ github.event.inputs.tag }}"
+          [[ -z "$tag" ]] && tag="${{ github.ref_name }}"
+          [[ "$tag" =~ ^v[0-9] ]] || { echo "Tag '$tag' must look like vMAJOR.MINOR.PATCH"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Stage release tree
+        shell: bash
+        run: |
+          stage="agent-cad-${{ steps.ver.outputs.tag }}"
+          mkdir -p "$stage"
+          # Files / dirs to ship. Frontend dist is pre-built so end users
+          # don't need Node just to install (only to rebuild from source).
+          paths=(
+            backend
+            frontend/dist
+            frontend/package.json
+            frontend/package-lock.json
+            frontend/index.html
+            frontend/src
+            frontend/tsconfig.json
+            frontend/tsconfig.app.json
+            frontend/tsconfig.node.json
+            frontend/vite.config.ts
+            scripts
+            docs
+            run.py
+            dev_server.py
+            pyproject.toml
+            README.md
+            CHANGELOG.md
+            LICENSE
+          )
+          for p in "${paths[@]}"; do
+            if [[ -e "$p" ]]; then
+              dest="$stage/$p"
+              mkdir -p "$(dirname "$dest")"
+              cp -r "$p" "$dest"
+            fi
+          done
+          # Mark POSIX scripts executable in the staged tree so the bits
+          # survive into the .tar.gz (zip preserves Unix attrs too).
+          chmod +x "$stage/scripts/install.sh" \
+                   "$stage/scripts/uninstall.sh" \
+                   "$stage/scripts/launch-agent-cad.sh" \
+                   "$stage/scripts/Launch-AgentCAD.command" 2>/dev/null || true
+
+      - name: Package zip + tarball
+        id: pkg
+        shell: bash
+        run: |
+          stage="agent-cad-${{ steps.ver.outputs.tag }}"
+          zip="${stage}.zip"
+          tar="${stage}.tar.gz"
+          # zip preserves Unix permissions in extra fields; most extractors
+          # honor them on POSIX. Windows users don't care about +x.
+          zip -ry "$zip" "$stage"
+          tar -czf "$tar" "$stage"
+          ls -lh "$zip" "$tar"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+          echo "tar=$tar" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifacts (CI inspection)
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-cad-release
+          path: |
+            ${{ steps.pkg.outputs.zip }}
+            ${{ steps.pkg.outputs.tar }}
+
+      - name: Publish GitHub Release (draft)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: Agent CAD ${{ steps.ver.outputs.tag }}
+          draft: true
+          generate_release_notes: true
+          files: |
+            ${{ steps.pkg.outputs.zip }}
+            ${{ steps.pkg.outputs.tar }}
