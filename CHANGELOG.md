@@ -4,7 +4,7 @@ All notable changes to Agent CAD are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] — 2026-05-06
+## [0.1.0] — 2026-05-08
 
 First public release. Early but functional — see "Status" in the README.
 
@@ -16,6 +16,19 @@ First public release. Early but functional — see "Status" in the README.
   re-licensing consent was needed.
 
 ### Added
+- **Image paste in chat.** The chat input's `Ctrl+V` / `Cmd+V` now
+  accepts clipboard images and stashes them as attachments alongside
+  drawings and viewer snapshots. The placeholder text always promised
+  this; the handler was never wired up until now.
+- **Remix-from-URL guidance for the agent.** New `REMIX_PROMPT_BLOCK`
+  in the system prompt tells the agent that when the user asks to
+  remix or base a design on something — by URL, photo, or phrasing
+  like "like this one" — its first job is reference acquisition
+  (open the page, download the source file into `imports/`, run
+  `import_inspect`), not writing CAD code. If Playwright is off, it
+  asks the user to enable it or import the file manually before
+  proceeding.
+
 - Claude-driven parametric CAD desktop app (Windows, pywebview + WebView2).
 - CADQuery executor, project model with per-object scripts and parameters,
   and a Tweaks panel that re-runs the model on parameter edits.

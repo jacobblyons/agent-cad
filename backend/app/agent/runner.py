@@ -255,6 +255,54 @@ the print phase, tell them to click the back arrow first.
 """
 
 
+REMIX_PROMPT_BLOCK = """
+REMIX WORKFLOW — when the user is asking you to base a design on
+something that already exists. Triggers include:
+  - a URL to a model marketplace (printables.com, makerworld.com,
+    thingiverse.com, grabcad.com, cults3d.com, pinshape.com, sketchfab.com,
+    etc.) in the user's message,
+  - the words "remix", "based on this", "like this one", "modify this
+    model", "take this and …" alongside any link or attached image,
+  - an attached photo / screenshot of an existing physical or 3D-printed
+    part where the user wants you to recreate or adapt it.
+
+Reference acquisition is your FIRST job. Do NOT write CAD code on
+turn 1. Required order:
+
+  1. SEE the source. If a URL was given, open it. If only an image
+     was given, you already have it — re-read it carefully before
+     touching code. If you have neither, ask the user for one.
+
+  2. GET the geometry where possible.
+     a. If Sketchfab is enabled and the URL is a Sketchfab page, use
+        mcp__cad__sketchfab_download.
+     b. Else if Playwright is enabled, browser_navigate to the listing
+        and download the STL / STEP / 3MF into the project's imports/
+        directory (the Playwright block above describes the click flow).
+     c. Else (no browser), use AskUserQuestion to ask the user EITHER
+        to enable Playwright in Settings → "Playwright enabled" so you
+        can fetch the source, OR to download the file themselves and
+        drop it in imports/. Don't proceed without the reference.
+
+  3. INSPECT what you got. After the file lands in imports/, call
+     list_imports + import_inspect to read its bounding box, units,
+     part count, and overall shape. If a visual confirmation will help,
+     scene_snapshot it next to your work-in-progress object.
+
+  4. ONLY THEN start writing CAD code. The first model script must be
+     informed by measurements / proportions / features visible in the
+     reference, not by ambient knowledge of the part name.
+
+Anti-pattern (do NOT do this): user pastes a Printables URL → you
+recognize the part name → you write a CAD script from memory → you
+present a model that doesn't match the source. The whole point of
+"remix" is to re-use the source's specific geometry. Substituting
+generic mental imagery for it is the failure mode this block exists
+to prevent. If you find yourself about to write code without having
+seen the source, STOP and go back to step 1.
+"""
+
+
 SKETCHFAB_PROMPT_BLOCK = """
 SKETCHFAB INTEGRATION (enabled):
 - mcp__cad__sketchfab_search — search the public catalogue for a
@@ -603,6 +651,12 @@ def _build_system_prompt(project: Project, *, playwright_active: bool,
     # searching for them.
     if playwright_active:
         body += PLAYWRIGHT_PROMPT_BLOCK
+    # The remix workflow block is unconditional — it applies regardless
+    # of which fetch tools are enabled, and it covers the no-browser
+    # fallback (ask the user to import the source manually). Goes after
+    # PLAYWRIGHT_PROMPT_BLOCK so the browser tool surface is in context
+    # by the time the remix block references it.
+    body += REMIX_PROMPT_BLOCK
     if print_phase and print_phase.get("active"):
         printer = print_phase.get("printer") or {}
         printer_label = (

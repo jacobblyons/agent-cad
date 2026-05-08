@@ -228,6 +228,35 @@ export function ChatPanel() {
                   submit();
                 }
               }}
+              onPaste={(e) => {
+                // Pull any images out of the clipboard and stash them as
+                // attachments. Text and HTML pastes fall through to the
+                // textarea's default behavior unchanged.
+                const items = e.clipboardData?.items;
+                if (!items || items.length === 0) return;
+                const imageItems = Array.from(items).filter(
+                  (it) => it.kind === "file" && it.type.startsWith("image/"),
+                );
+                if (imageItems.length === 0) return;
+                e.preventDefault();
+                for (const item of imageItems) {
+                  const file = item.getAsFile();
+                  if (!file) continue;
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    const result = reader.result;
+                    if (typeof result !== "string") return;
+                    const comma = result.indexOf(",");
+                    if (comma < 0) return;
+                    addAttachment({
+                      data: result.slice(comma + 1),
+                      mimeType: file.type || "image/png",
+                      source: "paste",
+                    });
+                  };
+                  reader.readAsDataURL(file);
+                }
+              }}
               placeholder="Describe a part, sketch a hint, or paste an image…"
               rows={1}
               className="min-h-[24px] flex-1 resize-none overflow-y-auto bg-transparent text-sm leading-relaxed outline-none placeholder:text-[var(--color-muted)]"

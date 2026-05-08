@@ -27,8 +27,10 @@ export type ChatImage = {
    * user's drawing for a render of the model.
    *  - "drawing" — freehand sketch on a blank canvas
    *  - "snapshot" — viewer screenshot the user drew on top of
+   *  - "paste" — image pasted from the OS clipboard (likely a reference
+   *    photo, not a render of the model)
    */
-  source?: "drawing" | "snapshot";
+  source?: "drawing" | "snapshot" | "paste";
   /** Free-form context (e.g. camera position) appended to the prompt preamble. */
   description?: string;
 };
@@ -137,6 +139,13 @@ export function formatAttachmentsForPrompt(images: ChatImage[], text: string): s
       return (
         `Image ${n}: a freehand sketch the user drew on a blank canvas to ` +
         `illustrate intent. Treat it as a hand-drawn hint, not a render of the model.`
+      );
+    }
+    if (img.source === "paste") {
+      return (
+        `Image ${n}: an image the user pasted from their clipboard. Most likely ` +
+        `a reference photo, screenshot, or marketplace listing — NOT a render ` +
+        `of the current model. Use it to inform geometry, proportions, and intent.`
       );
     }
     return `Image ${n}: a user-supplied image.`;
