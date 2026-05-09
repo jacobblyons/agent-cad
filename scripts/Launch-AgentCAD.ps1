@@ -12,7 +12,7 @@ $ErrorActionPreference = 'Stop'
 
 $ROOT    = Split-Path -Parent $PSScriptRoot
 $VENV_PY = Join-Path $ROOT '.venv\Scripts\python.exe'
-$RUN_PY  = Join-Path $ROOT 'run.py'
+$RUN_PY  = Join-Path $ROOT 'apps\cad\run.py'
 
 if (-not (Test-Path $VENV_PY)) {
     Add-Type -AssemblyName System.Windows.Forms

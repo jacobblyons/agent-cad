@@ -36,10 +36,10 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: apps/cad/frontend/package-lock.json
 
-      - name: Build frontend
-        working-directory: frontend
+      - name: Build agent-cad frontend
+        working-directory: apps/cad/frontend
         run: |
           npm ci
           npm run build
@@ -52,20 +52,21 @@ jobs:
           # Files / dirs to ship. Frontend dist is pre-built so end users
           # don't need Node just to install (only to rebuild from source).
           paths=(
-            backend
-            frontend/dist
-            frontend/package.json
-            frontend/package-lock.json
-            frontend/index.html
-            frontend/src
-            frontend/tsconfig.json
-            frontend/tsconfig.app.json
-            frontend/tsconfig.node.json
-            frontend/vite.config.ts
+            apps/cad/backend
+            apps/cad/frontend/dist
+            apps/cad/frontend/package.json
+            apps/cad/frontend/package-lock.json
+            apps/cad/frontend/index.html
+            apps/cad/frontend/src
+            apps/cad/frontend/tsconfig.json
+            apps/cad/frontend/tsconfig.app.json
+            apps/cad/frontend/tsconfig.node.json
+            apps/cad/frontend/vite.config.ts
+            apps/cad/run.py
+            apps/cad/dev_server.py
+            apps/cad/pyproject.toml
             scripts
             docs
-            run.py
-            dev_server.py
             pyproject.toml
             README.md
             CHANGELOG.md

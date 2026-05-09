@@ -18,5 +18,5 @@ if [ ! -x "$VENV_PY" ]; then
     exit 1
 fi
 
-cd "$ROOT"
+cd "$ROOT/apps/cad"
 exec "$VENV_PY" run.py --prod

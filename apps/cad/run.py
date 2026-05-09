@@ -20,19 +20,21 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))  # so `import dev_server` works after re-exec
+APP_ROOT = Path(__file__).resolve().parent          # apps/cad/
+REPO_ROOT = APP_ROOT.parents[1]                     # repo root
+sys.path.insert(0, str(APP_ROOT))  # so `import dev_server` works after re-exec
 
 import dev_server  # noqa: E402
 
-FRONTEND = ROOT / "frontend"
-BACKEND = ROOT / "backend"
+FRONTEND = APP_ROOT / "frontend"
+BACKEND = APP_ROOT / "backend"
 DIST_INDEX = FRONTEND / "dist" / "index.html"
 DEV_PORT = 5273
 DEV_URL = f"http://localhost:{DEV_PORT}"
 
 IS_WIN = os.name == "nt"
-VENV_PY = ROOT / ".venv" / ("Scripts" if IS_WIN else "bin") / ("python.exe" if IS_WIN else "python")
+# One venv at repo root, shared between agent-cad and agent-slicer.
+VENV_PY = REPO_ROOT / ".venv" / ("Scripts" if IS_WIN else "bin") / ("python.exe" if IS_WIN else "python")
 
 
 def reexec_in_venv() -> None:
@@ -98,7 +100,7 @@ def explain_busy_port() -> None:
     msg = [f"port {DEV_PORT} is already in use"]
     if holder:
         msg.append(f"  held by PID {holder.pid}{' (' + holder.name + ')' if holder.name else ''}")
-        msg.append(f"  free it with: python run.py --kill-port")
+        msg.append("  free it with: python apps/cad/run.py --kill-port")
     sys.exit("\n".join(msg))
 
 

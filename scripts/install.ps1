@@ -38,7 +38,8 @@ $ErrorActionPreference = 'Stop'
 $ROOT     = Split-Path -Parent $PSScriptRoot
 $VENV     = Join-Path $ROOT '.venv'
 $VENV_PY  = Join-Path $VENV 'Scripts\python.exe'
-$FRONTEND = Join-Path $ROOT 'frontend'
+$CAD_APP  = Join-Path $ROOT 'apps\cad'
+$FRONTEND = Join-Path $CAD_APP 'frontend'
 $DIST     = Join-Path $FRONTEND 'dist\index.html'
 
 function Write-Step([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
@@ -163,7 +164,7 @@ Write-Ok ".venv at $VENV"
 Write-Step 'Upgrading pip and installing Agent CAD'
 & $VENV_PY -m pip install --upgrade pip wheel
 if ($LASTEXITCODE -ne 0) { throw 'pip upgrade failed' }
-& $VENV_PY -m pip install -e $ROOT
+& $VENV_PY -m pip install -e $CAD_APP
 if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
 
 # 5. Build frontend if needed ---------------------------------------------
@@ -186,7 +187,7 @@ Write-Ok 'Frontend bundle ready.'
 if (-not $NoShortcut) {
     Write-Step 'Creating Start Menu and Desktop shortcuts'
     $launcher = Join-Path $ROOT 'scripts\Launch-AgentCAD.ps1'
-    $iconPath = Join-Path $ROOT 'frontend\dist\favicon.ico'
+    $iconPath = Join-Path $CAD_APP 'frontend\dist\favicon.ico'
     if (-not (Test-Path $iconPath)) { $iconPath = $null }
 
     $WS = New-Object -ComObject WScript.Shell

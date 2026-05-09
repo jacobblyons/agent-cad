@@ -1,7 +1,7 @@
 """Application entrypoint.
 
 Modes:
-  --dev   Load the Vite dev server at http://localhost:5173.
+  --dev   Load the Vite dev server at http://localhost:5273.
   (none)  Load the built frontend from frontend/dist/index.html.
 """
 from __future__ import annotations
@@ -15,8 +15,11 @@ import webview
 from .api import JsApi
 from .events import bus
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-FRONTEND_DIST = REPO_ROOT / "frontend" / "dist" / "index.html"
+# This file lives at apps/cad/backend/app/main.py — parents[2] is the
+# app root (apps/cad), which contains backend/ and frontend/. The repo
+# root is two more levels up but we don't need it here.
+APP_ROOT = Path(__file__).resolve().parents[2]
+FRONTEND_DIST = APP_ROOT / "frontend" / "dist" / "index.html"
 DEV_URL = "http://localhost:5273"
 
 

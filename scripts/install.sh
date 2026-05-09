@@ -23,7 +23,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VENV="$ROOT/.venv"
 VENV_PY="$VENV/bin/python"
-FRONTEND="$ROOT/frontend"
+CAD_APP="$ROOT/apps/cad"
+FRONTEND="$CAD_APP/frontend"
 DIST="$FRONTEND/dist/index.html"
 
 OS="$(uname -s)"   # Darwin / Linux
@@ -141,7 +142,7 @@ ok ".venv at $VENV"
 
 step "Upgrading pip and installing Agent CAD"
 "$VENV_PY" -m pip install --upgrade pip wheel
-"$VENV_PY" -m pip install -e "$ROOT"
+"$VENV_PY" -m pip install -e "$CAD_APP"
 
 # --- 5. Build frontend if needed ----------------------------------------
 
@@ -188,8 +189,8 @@ Next:
 EOF
 if [ "$OS" = "Darwin" ]; then
     echo "  2. Launch by double-clicking scripts/Launch-AgentCAD.command,"
-    echo "     or run: $VENV_PY $ROOT/run.py --prod"
+    echo "     or run: $VENV_PY $CAD_APP/run.py --prod"
 else
     echo "  2. Launch from your application menu (Agent CAD),"
-    echo "     or run: $VENV_PY $ROOT/run.py --prod"
+    echo "     or run: $VENV_PY $CAD_APP/run.py --prod"
 fi

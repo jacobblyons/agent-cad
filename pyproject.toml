@@ -1,41 +1,13 @@
-[project]
-name = "agent-cad"
-version = "0.1.0"
-description = "LLM-driven parametric CAD desktop app"
-license = "Apache-2.0"
-license-files = ["LICENSE"]
-requires-python = ">=3.11,<3.13"
-dependencies = [
-    "pywebview>=5.3",
-    "cadquery>=2.5",
-    "claude-agent-sdk>=0.1",
-    "pillow>=10.0",
-    "trimesh>=4.4",
-    "numpy>=1.26",
-    "httpx>=0.27",
-    "websockets>=14",
-    # paho-mqtt is the protocol the Bambu printer's LAN-mode "start
-    # print" command rides on. Tiny, BSD-licensed, no transitive deps.
-    "paho-mqtt>=2.1",
-    # imageio-ffmpeg ships a self-contained ffmpeg binary (per-platform,
-    # ~30 MB) so the printer-snapshot CLI can grab a frame off the
-    # printer's RTSPS camera stream without requiring a system ffmpeg.
-    "imageio-ffmpeg>=0.5",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pyinstaller>=6.10",
-    "ruff>=0.6",
-    "pytest>=8.0",
-]
-
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools.packages.find]
-where = ["backend"]
+# Workspace root for the cc-cad monorepo.
+#
+# Each app under apps/ has its own pyproject.toml:
+#   - apps/cad/pyproject.toml        (agent-cad)
+#   - apps/slicer/pyproject.toml     (agent-slicer, coming v0.2.0)
+#
+# This root file is intentionally NOT a [project] — it carries only
+# workspace-level tooling config. Installer scripts pip-install each
+# app individually into a single shared venv at the repo root, so the
+# apps share heavy native deps (cadquery-ocp, vtk) instead of duplicating.
 
 [tool.ruff]
 line-length = 100

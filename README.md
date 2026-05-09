@@ -98,11 +98,15 @@ Uninstall: `./scripts/uninstall.sh`
 
 ## Layout
 ```
-backend/app/        Python — pywebview host, CAD executor, agent runner, MCP tools
-frontend/           React app loaded in the webview
-docs/               Design notes
-run.py              Single-command launcher (dev or prod)
-dev_server.py       Vite child-process supervisor (Windows job-bound)
+apps/cad/                  Agent CAD (this repo)
+  backend/app/             Python — pywebview host, CAD executor, agent runner, MCP tools
+  frontend/                React app loaded in the webview
+  run.py                   Single-command launcher (dev or prod)
+  dev_server.py            Vite child-process supervisor (Windows job-bound)
+apps/slicer/               Agent Slicer (coming v0.2.0 — see docs/agent-slicer.md)
+shared/                    Shared chat panel, agent shell, etc. (coming v0.2.0)
+docs/                      Design notes
+scripts/                   Cross-platform installers
 ```
 
 ## Run from source (developer install)
@@ -111,14 +115,15 @@ If you cloned the repo (rather than downloading a release zip) and want
 to run from source, one command from the repo root:
 
 ```bash
-python run.py             # dev:  vite + pywebview window
-python run.py --prod      # prod: serves the built bundle (auto-builds if missing)
-python run.py --build     # rebuild frontend, then prod
-python run.py --kill-port # nuke whatever is on the dev port
+python apps/cad/run.py             # dev:  vite + pywebview window
+python apps/cad/run.py --prod      # prod: serves the built bundle (auto-builds if missing)
+python apps/cad/run.py --build     # rebuild frontend, then prod
+python apps/cad/run.py --kill-port # nuke whatever is on the dev port
 ```
 
-`run.py` self-bootstraps into `.venv/` if you invoke it with the system
-Python, so a fresh shell needs no activation step.
+`run.py` self-bootstraps into the repo-root `.venv/` if you invoke it
+with the system Python, so a fresh shell needs no activation step. The
+venv is shared between agent-cad and (eventually) agent-slicer.
 
 You'll still need Node, the `claude` CLI, and Claude auth as described
 in the **Install** section above.
