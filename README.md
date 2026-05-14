@@ -5,9 +5,10 @@ edit the model in a Claude-style chat + 3D viewer UI.
 
 ### Agentic coding experience with CAD specific tooling
 - agent can download reference models, research dimensions, make plans, and more.
+<img width="1782" height="1020" alt="image" src="https://github.com/user-attachments/assets/b847cb9f-0f7a-4bd2-a0d4-71b92c4a133b" />
 <img width="1248" height="1027" alt="image" src="https://github.com/user-attachments/assets/21002111-1e06-4bb4-9524-ca8882df7a8e" />
 
-<img width="1782" height="1020" alt="image" src="https://github.com/user-attachments/assets/b847cb9f-0f7a-4bd2-a0d4-71b92c4a133b" />
+
 
 
 ## Stack
