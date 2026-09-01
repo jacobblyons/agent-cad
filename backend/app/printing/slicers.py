@@ -419,24 +419,24 @@ class BambuStudioSlicer(Slicer):
         chain.reverse()
         return chain
 
-    def _flatten_filament_profile(
-        self, root: Path, name: str, out_dir: Path,
+    def _flatten_profile(
+        self, root: Path, kind: str, name: str, out_dir: Path,
     ) -> Path | None:
         """Resolve `name` plus its `inherits` chain into a single flat
-        filament JSON written to `out_dir`. Returns the temp file path
+        profile JSON written to `out_dir`. Returns the temp file path
         or None if the leaf can't be found.
 
         Why we flatten ourselves rather than passing the chain: Bambu
-        Studio's CLI interprets each --load-filaments entry as a
-        SEPARATE filament slot (multi-material setup), not as
-        inheritance. So loading the chain gets you N filaments instead
-        of one merged profile. We do the merge by deep-copying the
-        root parent and then layering each child on top in
-        parent→child order. The result is a self-contained leaf with
-        no `inherits` field, which the slicer can ingest as a single
-        filament without ambiguity.
+        Studio's CLI doesn't traverse `inherits` for `machine` or
+        `filament` kinds — anything defined only on a parent (the X1C's
+        `machine_end_gcode`, all the temps on a non-PLA filament) goes
+        missing. And for filaments, `--load-filaments a.json;b.json`
+        means "two filament slots", not inheritance. We do the merge by
+        deep-copying the root parent and then layering each child on top
+        in parent→child order. The result is a self-contained leaf with
+        no `inherits` field, which the slicer can ingest unambiguously.
         """
-        chain = self._resolve_inheritance_chain(root, "filament", name)
+        chain = self._resolve_inheritance_chain(root, kind, name)
         if not chain:
             return None
         merged: dict = {}
@@ -457,7 +457,7 @@ class BambuStudioSlicer(Slicer):
         # works against the printer profile we're loading.
         merged["name"] = chain[-1].stem
         suffix = uuid.uuid4().hex[:6]
-        out_path = out_dir / f"filament-flat-{suffix}.json"
+        out_path = out_dir / f"{kind}-flat-{suffix}.json"
         out_path.write_text(json.dumps(merged, indent=2), encoding="utf-8")
         return out_path
 
@@ -591,10 +591,14 @@ class BambuStudioSlicer(Slicer):
 
         machine_path = self._resolve_profile(profile_root, "machine", machine_name)
         process_path = self._resolve_profile(profile_root, "process", process_name)
-        # Filament: leaf-only loads collapse to PLA defaults for non-PLA
-        # materials because Bambu's CLI doesn't traverse `inherits`. We
-        # build a flattened temp profile that bakes the whole chain into
-        # one JSON so temps and material flags resolve correctly.
+        # Machine + filament: leaf-only loads drop everything defined on
+        # parent profiles because Bambu's CLI doesn't traverse `inherits`
+        # for these kinds. The X1C leaf has `machine_end_gcode: None` —
+        # the real end sequence (turn off bed, park, lower z) lives in
+        # `fdm_bbl_3dp_001_common`. Same shape for non-PLA filaments
+        # (temps, fan curves, etc. are on parents). We flatten both into
+        # self-contained temp files. Process inheritance is fine — Bambu
+        # CLI handles it for that kind.
         filament_leaf_path = self._resolve_profile(profile_root, "filament", filament_name)
 
         missing: list[str] = []
@@ -648,11 +652,21 @@ class BambuStudioSlicer(Slicer):
         # exporter sometimes ships a slightly newer revision and this
         # avoids a hard reject.
         # See: https://github.com/bambulab/BambuStudio/wiki/Command-Line-Usage
-        # Always pass a flattened single-file filament profile —
-        # bypasses Bambu CLI's broken inheritance resolution AND the
-        # multi-slot interpretation of multi-path --load-filaments.
-        flat_filament = self._flatten_filament_profile(
-            profile_root, filament_name, out_dir,
+        # Always pass flattened single-file machine + filament profiles —
+        # bypasses Bambu CLI's broken inheritance resolution. For
+        # filaments it also bypasses the multi-slot interpretation of
+        # multi-path --load-filaments. For machines, this is what makes
+        # the proper end-gcode (M140 S0, park-to-back, lower-bed) reach
+        # the slice instead of the empty-string default on the leaf.
+        flat_machine = self._flatten_profile(
+            profile_root, "machine", machine_name, out_dir,
+        )
+        if flat_machine is None:
+            return SliceResult(ok=False, error=(
+                f"failed to flatten machine profile {machine_name!r}"
+            ))
+        flat_filament = self._flatten_profile(
+            profile_root, "filament", filament_name, out_dir,
         )
         if flat_filament is None:
             return SliceResult(ok=False, error=(
@@ -661,7 +675,7 @@ class BambuStudioSlicer(Slicer):
         argv = [
             cli,
             "--allow-newer-file",
-            "--load-settings", f"{machine_path};{effective_process_path}",
+            "--load-settings", f"{flat_machine};{effective_process_path}",
             "--load-filaments", str(flat_filament),
             "--orient", "1",
             "--arrange", "1",
